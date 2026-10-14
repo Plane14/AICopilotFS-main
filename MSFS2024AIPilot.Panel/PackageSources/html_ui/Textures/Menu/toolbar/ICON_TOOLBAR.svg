@@ -1,0 +1,14 @@
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg"
+ width="64px" height="64px" viewBox="0 0 64 64"
+ preserveAspectRatio="xMidYMid meet">
+  <g fill="#000000" stroke="none">
+    <!-- Fuselage and wings, drawn as a single plane silhouette. -->
+    <path d="M31.5 6 c-1.6 0 -2.9 1.2 -3.1 2.8 L26 26 13 33 c-1.4 0.7 -2.1 2.3 -1.6 3.8 l1.6 4.6 c0.4 1.2 1.5 2 2.8 2 h4.2 L21 52 c0 1 0.8 1.8 1.8 1.8 h5.1 c1 0 1.8 -0.8 1.8 -1.8 l1 -11.8 1 -11.8 V6 z"/>
+    <path d="M32.5 6 c1.6 0 2.9 1.2 3.1 2.8 L38 26 51 33 c1.4 0.7 2.1 2.3 1.6 3.8 l-1.6 4.6 c-0.4 1.2 -1.5 2 -2.8 2 h-4.2 L43 52 c0 1 -0.8 1.8 -1.8 1.8 h-5.1 c-1 0 -1.8 -0.8 -1.8 -1.8 L33 39.2 32 27.4 32.5 6 z"/>
+    <!-- Neural nodes across the top edge, marking the automation. -->
+    <circle cx="11" cy="11" r="3.2"/>
+    <circle cx="32" cy="6.5" r="3.2"/>
+    <circle cx="53" cy="11" r="3.2"/>
+    <path d="M11 11 l21 -4.5 l21 4.5" fill="none" stroke="#000000" stroke-width="1.6"/>
+  </g>
+</svg>

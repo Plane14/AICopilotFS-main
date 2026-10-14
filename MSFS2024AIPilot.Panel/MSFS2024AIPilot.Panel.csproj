@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Named pipes are Windows-only, matching the Windows-only SimConnect host. -->
+    <SupportedOSPlatform>windows</SupportedOSPlatform>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MSFS2024AIPilot.Core\MSFS2024AIPilot.Core.csproj" />
+  </ItemGroup>
+
+  <!--
+    The in-sim panel itself is a static MSFS package (PackageSources) that does not
+    need compiling: it is HTML/JS/CSS plus a small XML set that fspackagetool.exe
+    turns into an .spb. It is shipped from here unchanged, so mark it as content that
+    is copied to the output directory for packaging and inspection.
+  -->
+  <ItemGroup>
+    <Content Include="PackageSources\**\*"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="PackageDefinitions\**\*"
+             CopyToOutputDirectory="PreserveNewest" />
+    <None Include="package.xml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="manifest.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="layout.json"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="build.bat"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

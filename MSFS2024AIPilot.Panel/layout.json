@@ -1,0 +1,29 @@
+{
+  "content": [
+    {
+      "path": "html_ui/ingamepanels/aipilotpanel/aipilotpanel.css",
+      "size": 4436,
+      "date": 134362287522065126
+    },
+    {
+      "path": "html_ui/ingamepanels/aipilotpanel/aipilotpanel.html",
+      "size": 3253,
+      "date": 134362287376254947
+    },
+    {
+      "path": "html_ui/ingamepanels/aipilotpanel/aipilotpanel.js",
+      "size": 8273,
+      "date": 134362287483154156
+    },
+    {
+      "path": "html_ui/textures/menu/toolbar/icon_toolbar.svg",
+      "size": 949,
+      "date": 134362226749449129
+    },
+    {
+      "path": "ingamepanels/ingamepanel_aipilotpanel.spb",
+      "size": 600,
+      "date": 134362225604338611
+    }
+  ]
+}

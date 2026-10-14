@@ -1,0 +1,10 @@
+# Build output from fspackagetool.exe
+Packages/
+_Temp/
+
+# .NET build output
+bin/
+obj/
+
+# Panel dependency log
+manifest.json.bak

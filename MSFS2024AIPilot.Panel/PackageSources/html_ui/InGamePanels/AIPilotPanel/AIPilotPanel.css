@@ -1,0 +1,191 @@
+ingame-ui#AIPilotPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  height: 100% !important;
+  width: 100% !important;
+  font-family: Roboto, sans-serif;
+  color: var(--textColor);
+}
+
+ingame-ui#AIPilotPanel .ingameUiContent,
+ingame-ui#AIPilotPanel .ingameUiWrapper {
+  display: flex !important;
+  flex-direction: column !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden !important;
+  align-items: stretch !important;
+  flex: 1 1 auto !important;
+}
+
+/* Status bar: control state on the left, link state on the right. */
+ingame-ui#AIPilotPanel .aipilot-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: var(--fontSizeSmall);
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+}
+
+ingame-ui#AIPilotPanel .aipilot-state {
+  font-weight: 700;
+  color: var(--textColor);
+}
+
+ingame-ui#AIPilotPanel .aipilot-state.is-ai {
+  color: #6dbd6d;
+}
+
+ingame-ui#AIPilotPanel .aipilot-conn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--textColorSecondary, rgba(255, 255, 255, 0.6));
+}
+
+ingame-ui#AIPilotPanel .aipilot-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d05b5b;
+}
+
+ingame-ui#AIPilotPanel .aipilot-dot.is-online {
+  background: #6dbd6d;
+}
+
+/* Flight phase block. */
+ingame-ui#AIPilotPanel .aipilot-phase {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+}
+
+ingame-ui#AIPilotPanel .aipilot-phaseLabel {
+  font-size: var(--fontSizeExtraSmall);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--textColorSecondary, rgba(255, 255, 255, 0.6));
+}
+
+ingame-ui#AIPilotPanel .aipilot-phaseValue {
+  font-size: var(--fontSizeParagraph);
+  font-weight: 700;
+  color: var(--accentColor, #4fc3f7);
+}
+
+/* Current aircraft checklist checkpoint. */
+ingame-ui#AIPilotPanel .aipilot-checklist {
+  padding: 5px 8px;
+  font-size: var(--fontSizeSmall);
+  font-weight: 600;
+  color: var(--accentColor, #4fc3f7);
+  border-bottom: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Traffic line, which turns red when the runway is not usable. */
+ingame-ui#AIPilotPanel .aipilot-checklist.is-warning {
+  color: var(--errorColor, #ff5252);
+}
+
+/* Telemetry grid. */
+ingame-ui#AIPilotPanel .aipilot-telemetry {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--borderColor, rgba(255, 255, 255, 0.12));
+  border-bottom: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+}
+
+ingame-ui#AIPilotPanel .aipilot-tele {
+  background: var(--backgroundColorPanel);
+  padding: 5px 6px;
+}
+
+ingame-ui#AIPilotPanel .aipilot-teleLabel {
+  font-size: var(--fontSizeExtraSmall);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--textColorSecondary, rgba(255, 255, 255, 0.6));
+}
+
+ingame-ui#AIPilotPanel .aipilot-teleValue {
+  font-size: var(--fontSizeParagraph);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The delegation button. new-push-button styles itself from its own framework CSS
+   (driven by the size class on the element), so only the wrapper is styled here. */
+ingame-ui#AIPilotPanel .aipilot-actions {
+  padding: 8px;
+}
+
+ingame-ui#AIPilotPanel .aipilot-actions new-push-button {
+  width: 100%;
+}
+
+/* Route and log. */
+ingame-ui#AIPilotPanel .aipilot-route {
+  padding: 4px 8px;
+  font-size: var(--fontSizeSmall);
+  color: var(--textColorSecondary, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ATC line: controller source, tuned station and the clearances held so far. */
+ingame-ui#AIPilotPanel .aipilot-atc {
+  padding: 4px 8px;
+  font-size: var(--fontSizeSmall);
+  font-weight: 600;
+  color: var(--textColor, #ffffff);
+  border-top: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+ingame-ui#AIPilotPanel .aipilot-log {
+  flex: 1 1 auto;
+  margin: 0 8px 8px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--borderColor, rgba(255, 255, 255, 0.12));
+  border-radius: 3px;
+  font-family: RobotoMono-Light, monospace;
+  font-size: var(--fontSizeExtraSmall);
+  line-height: 1.5;
+  color: var(--textColorSecondary, rgba(255, 255, 255, 0.6));
+  overflow-y: auto;
+  min-height: 40px;
+}
+
+ingame-ui#AIPilotPanel .aipilot-log .log-entry {
+  margin-bottom: 1px;
+  word-break: break-word;
+}
+
+ingame-ui#AIPilotPanel .aipilot-log .log-entry:first-child {
+  color: var(--textColor);
+}
+
+ingame-ui#AIPilotPanel .aipilot-log .log-entry.log-phase {
+  color: var(--accentColor, #4fc3f7);
+}
+
+@font-face {
+  font-family: "RobotoMono-Light";
+  src: url("/Fonts/RobotoMono-Light.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
