@@ -540,13 +540,18 @@ public sealed class EnvelopeGuard
         if (state.OverspeedWarning) Note(OperatingLimit.Airspeed);
 
         // Flap and gear limits are configuration limits, so they are tested against the
-        // configuration actually selected rather than against the clean limit.
+        // configuration actually selected rather than against the clean limit. The breach
+        // is named after the limit that was actually broken: the old ternary fell through
+        // to GearSpeed whenever the flaps were up, so a clean overspeed above Vne/Vno was
+        // reported as "gear extended above Vle" with the gear retracted.
         var configurationLimit = _limits.ConfigurationSpeedLimitKt(flapHandleIndex, gearDown);
         if (configurationLimit > 0 && state.IndicatedAirspeed > configurationLimit + 2)
         {
-            Note(flapHandleIndex >= 1 && state.IndicatedAirspeed > _limits.MaxFlapSpeedKt
+            Note(flapHandleIndex >= 1 && _limits.HasFlapSpeedLimit && state.IndicatedAirspeed > _limits.MaxFlapSpeedKt
                 ? OperatingLimit.FlapSpeed
-                : OperatingLimit.GearSpeed);
+                : gearDown && _limits.HasGearSpeedLimit && state.IndicatedAirspeed > _limits.MaxGearSpeedKt
+                    ? OperatingLimit.GearSpeed
+                    : OperatingLimit.Airspeed);
         }
 
         if (LoadFactorHeadroom < 0) Note(OperatingLimit.LoadFactor);

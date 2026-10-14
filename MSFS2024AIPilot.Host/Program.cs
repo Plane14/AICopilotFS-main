@@ -94,7 +94,14 @@ while (running)
                 // A forced reload rebuilds the graph against where the aircraft is standing
                 // now: the frame is calibrated from position, so an airport loaded before
                 // arriving has a frame that was chosen from the wrong position.
-                pilot.RequestAirportData(arg, force: IsReloadCommand(ref arg));
+                //
+                // The flag is read first, in its own statement: method arguments are
+                // evaluated left to right, so passing "IsReloadCommand(ref arg)" as an
+                // argument of RequestAirportData ran it *after* `arg` had already been
+                // captured - the reload asked the simulator for the airport "RELOAD KJFK"
+                // and printed the stripped name it had been changed to.
+                var forceReload = AirportCommandArguments.IsReloadCommand(ref arg);
+                pilot.RequestAirportData(arg, force: forceReload);
                 Console.WriteLine($"[airport] requesting {arg}");
             }
             else
@@ -318,18 +325,3 @@ while (running)
 pilot.Stop();
 pilot.Dispose();
 Console.WriteLine("AI Pilot shut down.");
-
-/// <summary>
-/// Reads an "airport reload <ICAO>" argument, consuming the reload word and leaving
-/// the ICAO in <paramref name="arg"/>. Returns true when the airport data should be
-/// requested again rather than taken from the cache.
-/// </summary>
-static bool IsReloadCommand(ref string arg)
-{
-    if (arg is null) return false;
-    var parts = arg.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-    if (parts.Length < 2) return false;
-    if (!parts[0].Equals("reload", StringComparison.OrdinalIgnoreCase)) return false;
-    arg = parts[1];
-    return true;
-}

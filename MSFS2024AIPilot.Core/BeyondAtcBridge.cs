@@ -251,17 +251,26 @@ public sealed class BeyondAtcBridge
         Parsing.Int32(digits.Replace(",", ""));
 
     /// <summary>
-    /// The heading a clearance assigns, normalised into [0, 360). "TURN LEFT 10 DEGREES"
-    /// and "HEADING 360" both mean something a pilot acts on, and a value of 360 is the
-    /// same direction as 0 rather than a wrap-around.
+    /// The heading a clearance assigns, normalised into [0, 360). "TURN LEFT HEADING 270",
+    /// "TURN TO 90 DEGREES" and "HEADING 360" both mean something a pilot acts on, and a
+    /// value of 360 is the same direction as 0 rather than a wrap-around.
+    /// <para>
+    /// A heading is an *absolute* direction and only the forms that name one are read. A
+    /// relative turn - "turn left 10 degrees" - is not an assignment of a heading: it is
+    /// measured from the heading the aircraft is already on, which a stateless parser does
+    /// not have. Reading the number as a heading steered the bug at 010, so a ten-degree
+    /// correction became a heading assignment ninety degrees off course. The word HEADING
+    /// is what distinguishes the two, and "TURN TO n DEGREES" is the only degrees form
+    /// that names a direction rather than an amount to turn through.
+    /// </para>
     /// </summary>
     private static int? AssignedHeadingDeg(string text)
     {
         var m = Regex.Match(text, @"(?:HEADING|HDG|COURSE)\s*(\d{1,3})");
         if (!m.Success)
-            m = Regex.Match(text, @"TURN\s+(?:LEFT|RIGHT)\s+(?:TO\s+)?(?:HEADING\s+)?(\d{1,3})");
+            m = Regex.Match(text, @"TURN\s+(?:LEFT|RIGHT)\s+(?:TO\s+)?HEADING\s+(\d{1,3})");
         if (!m.Success)
-            m = Regex.Match(text, @"(?:TURN|FLY|STEER)\s+(?:TO\s+)?(\d{1,3})\s*DEGREES");
+            m = Regex.Match(text, @"(?:TURN|FLY|STEER)\s+TO\s+(\d{1,3})\s*DEGREES");
         if (!m.Success) return null;
 
         var hdg = Parsing.Int32(m.Groups[1].Value);

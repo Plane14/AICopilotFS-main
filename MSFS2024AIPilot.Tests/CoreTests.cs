@@ -263,14 +263,19 @@ public class AtcParserTests
         [InlineData("Fly heading 250", 250)]
         [InlineData("Heading 250", 250)]
         [InlineData("HDG 250", 250)]
+        [InlineData("Turn to 90 degrees", 90)]
         public void EveryHeadingSpellingIsRead(string text, int expected)
             => Assert.Equal(expected, BeyondAtcBridge.ParseAtcText(text, "APP").HeadingDeg);
 
         [Fact]
-        public void ATurnToADegreeOffsetIsRead()
+        public void ARelativeTurnIsNotAnAbsoluteHeading()
         {
+            // "Turn left 10 degrees" is measured from the heading the aircraft is already
+            // on, which the parser does not know: the number is not a heading assignment.
+            // Reading it as one steered the bug at 010 - a ten-degree correction flown as
+            // a heading ninety degrees off course.
             var inst = BeyondAtcBridge.ParseAtcText("Turn left 10 degrees", "APP");
-            Assert.Equal(10, inst.HeadingDeg);
+            Assert.Null(inst.HeadingDeg);
         }
 
         [Fact]

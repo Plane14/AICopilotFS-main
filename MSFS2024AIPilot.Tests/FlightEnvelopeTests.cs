@@ -516,6 +516,19 @@ public class FlightEnvelopeTests
     }
 
     [Fact]
+    public void ACleanOverspeedIsNotReportedAsAGearBreach()
+    {
+        // Flaps and gear retracted, 20 knots above Vne. The breach used to fall through to
+        // GearSpeed - "gear extended above Vle" - for every overspeed with the gear up,
+        // because the classification only asked whether the flaps were selected.
+        var guard = new EnvelopeGuard();
+        guard.Update(State(ias: 185), LightPerf(), 0, false);
+
+        Assert.True(guard.AnyExceeded);
+        Assert.Equal(OperatingLimit.Airspeed, guard.CurrentBreach);
+    }
+
+    [Fact]
     public void TheSimulatorsOwnOverspeedWarningIsReportedBeforeAnyArithmetic()
     {
         var guard = new EnvelopeGuard();

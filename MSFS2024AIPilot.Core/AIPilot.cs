@@ -1782,7 +1782,7 @@ public sealed class AIPilot : IDisposable
             }
 
             PhaseStatus(_activeTaxiRoute?.Success == true
-                ? $"Taxiing to runway {_aircraft.State.Navigation.DepartureRunway ?? ""}"
+                ? $"Taxiing to runway {DepartureRunwayFor(s) ?? ""}"
                 : "Taxiing to runway...", dt);
 
             // Slow down for tighter turns
@@ -2193,7 +2193,10 @@ public sealed class AIPilot : IDisposable
         // Position-derived awareness of the airport markings, the whole point of the phase.
         _atRunwayHoldShort = true;
 
-        var runway = _aircraft.State.Navigation.DepartureRunway;
+        // The runway the controller assigned, not the one the plan files: the route and
+        // the hold-short were planned to the assigned strip, so a hold-short announcement
+        // naming the plan's runway named a strip the aircraft is not holding short of.
+        var runway = DepartureRunwayFor(s);
         var where = string.IsNullOrEmpty(runway) ? "the runway" : $"runway {runway}";
 
         if (!_takeoffCleared)

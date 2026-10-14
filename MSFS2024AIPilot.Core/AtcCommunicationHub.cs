@@ -195,13 +195,6 @@ public sealed class AtcCommunicationHub : IDisposable
 
         ResolveSource();
 
-        // The menu probe keeps advancing whichever controller is active. A request in
-        // flight was made through the sim's ATC menu, so it is a native request even if
-        // BeyondATC started running while it was being pressed - and leaving it unticked
-        // left the engine permanently busy, which blocked every later request for the
-        // session.
-        _requests.Tick();
-
         if (Source == AtcSource.Native)
         {
             if (IsNativeStateFresh(snapshot)) TickNative(snapshot);
@@ -212,7 +205,10 @@ public sealed class AtcCommunicationHub : IDisposable
         }
 
         // The request engine advances here, inside the same gate a request from another
-        // thread takes to start one: see _requestGate.
+        // thread takes to start one: see _requestGate. Advancing it outside that gate -
+        // and a second time inside it - mutated the engine's collections from two threads
+        // while the HTTP bridge, the pipe or the console could be starting a request, and
+        // double-ticked a probe whose state machine assumes one tick per frame.
         lock (_requestGate)
         {
             _requests.Tick();
