@@ -449,7 +449,7 @@ public sealed class AtcRequestEngine
     private bool UnintendedEffect()
     {
         var pending = _pending!;
-        if (_entryBlamed || ProbedEntry < 1 || pending.StateSignature == null && pending.LiveState == null) return false;
+        if (_entryBlamed || ProbedEntry < 1 || (pending.StateSignature == null && pending.LiveState == null)) return false;
 
         var current = pending.LiveState != null ? pending.CurrentSignature : pending.StateSignature!();
         if (string.Equals(current, _signatureBaseline, StringComparison.Ordinal)) return false;
