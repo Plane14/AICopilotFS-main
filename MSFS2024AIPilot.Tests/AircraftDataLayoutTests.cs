@@ -136,9 +136,11 @@ public class AircraftDataLayoutTests
             "PUSHBACK ANGLE",
         }, Block("PUSHBACK").Select(d => d.Name));
 
-        // The state datum is the documented enum, so it is requested with the enum unit;
-        // the angle is radians, which is what the tug's heading is published in.
-        Assert.Equal("enum", Block("PUSHBACK")[3].Units);
+        // The state datum is the documented enum, so it is requested with no unit; the
+        // MSFS 2024 docs list none for it, and a unit such as "enum" is rejected as an
+        // unrecognised name. The angle is radians, which is what the tug's heading is
+        // published in.
+        Assert.Equal("", Block("PUSHBACK")[3].Units);
         Assert.Equal("radians", Block("PUSHBACK")[4].Units);
     }
 
@@ -173,6 +175,13 @@ public class AircraftDataLayoutTests
     [Fact]
     public void EveryDatumHasAUnit()
     {
-        Assert.All(AircraftController.DataLayout, d => Assert.False(string.IsNullOrWhiteSpace(d.Units)));
+        // Every datum carries a unit except PUSHBACK STATE, which the MSFS 2024 docs
+        // list with none; a unit such as "enum" is rejected as an unrecognised name.
+        foreach (var d in AircraftController.DataLayout)
+        {
+            if (d.Name == "PUSHBACK STATE:1") continue;
+            Assert.False(string.IsNullOrWhiteSpace(d.Units),
+                $"datum {d.Name} in block {d.Block} has no unit");
+        }
     }
 }

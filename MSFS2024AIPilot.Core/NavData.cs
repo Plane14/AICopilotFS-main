@@ -196,14 +196,21 @@ public sealed class ApproachLeg
 
 /// <summary>A named way in to an approach: the IAF, its altitude and the legs that follow.</summary>
 public sealed class ApproachTransition
-{
-    public string Name { get; set; } = "";
-    public string IafIcao { get; set; } = "";
-    public string IafRegion { get; set; } = "";
-    public char IafType { get; set; } = 'W';
-    public double IafAltitudeFt { get; set; }
-    public List<ApproachLeg> Legs { get; } = new();
-}
+    {
+        public ApproachKind Type { get; set; } = ApproachKind.Undefined;
+        public string IafIcao { get; set; } = "";
+        public string IafRegion { get; set; } = "";
+        public char IafType { get; set; } = 'W';
+        public double IafAltitudeFt { get; set; }
+        public string DmeArcIcao { get; set; } = "";
+        public string DmeArcRegion { get; set; } = "";
+        public char DmeArcType { get; set; } = 'W';
+        public int DmeArcRadial { get; set; }
+        public double DmeArcDistanceMeters { get; set; }
+        public string Name { get; set; } = "";
+        public int LegCount { get; set; }
+        public List<ApproachLeg> Legs { get; } = new();
+    }
 
 /// <summary>
 /// One published approach to a runway: its identification, its final approach legs and
@@ -439,9 +446,14 @@ public static class ApproachRecordParser
     public static ApproachTransition ParseTransition(FacilityDataRecord rec)
     {
         var r = new FacilityPayloadReader(rec.Payload);
-        return new ApproachTransition
+        // The APPROACH_TRANSITION payload order is exactly the one the MSFS 2024 docs
+        // publish: TYPE, IAF_ICAO, IAF_REGION, IAF_TYPE, IAF_ALTITUDE, DME_ARC_ICAO,
+        // DME_ARC_REGION, DME_ARC_TYPE, DME_ARC_RADIAL, DME_ARC_DISTANCE, NAME,
+        // N_APPROACH_LEGS. Getting the order wrong is silent garbage rather than an error,
+        // which is why the parser is pinned by tests that build the payload field by field.
+        var transition = new ApproachTransition
         {
-            Name = r.ReadString(8),
+            Type = (ApproachKind)r.ReadInt32(),
             IafIcao = r.ReadString(8),
             IafRegion = r.ReadString(8),
             IafType = (char)r.ReadInt32(),
@@ -449,7 +461,16 @@ public static class ApproachRecordParser
             // ALTITUDE1/ALTITUDE2 constraints, which are metres. Converting it as if it
             // were metres inflated the transition's initial altitude by 3.28.
             IafAltitudeFt = r.ReadFloat32(),
+            DmeArcIcao = r.ReadString(8),
+            DmeArcRegion = r.ReadString(8),
+            DmeArcType = (char)r.ReadInt32(),
+            DmeArcRadial = r.ReadInt32(),
+            DmeArcDistanceMeters = r.ReadFloat32(),
+            Name = r.ReadString(8),
+            LegCount = r.ReadInt32(),
         };
+
+        return transition;
     }
 
     /// <summary>Reads a waypoint record from the waypoint facility entry point.</summary>

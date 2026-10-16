@@ -252,15 +252,15 @@ public sealed class AircraftController
 
         // The pushback tug, from the airport-services SimVars. Their own block, so a name
         // this build has wrong leaves the pushback simply unknown - no request is made and
-        // the aircraft taxis out under its own power - rather than disturbing the blocks
+// the aircraft taxis out under its own power - rather than disturbing the blocks
         // every phase reads. The state SimVar is indexed because the SDK documents it that
-        // way; the enum unit is the one the same documentation gives it.
-        layout.AddRange(new[]
+        // way; the datum carries no unit (the MSFS 2024 docs list none for it).
+        layout.AddRange(new (string block, string datum, string unit)[]
         {
             ("PUSHBACK", "PUSHBACK ATTACHED", "bool"),
             ("PUSHBACK", "PUSHBACK AVAILABLE", "bool"),
             ("PUSHBACK", "PUSHBACK WAIT", "bool"),
-            ("PUSHBACK", "PUSHBACK STATE:1", "enum"),
+            ("PUSHBACK", "PUSHBACK STATE:1", ""),
             ("PUSHBACK", "PUSHBACK ANGLE", "radians"),
         });
 
