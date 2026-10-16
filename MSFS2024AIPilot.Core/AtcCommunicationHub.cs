@@ -403,26 +403,27 @@ public sealed class AtcCommunicationHub : IDisposable
         var context = RequestContext(kind, snapshot, effectivePhase);
         var description = reason == null ? label : $"{label} ({reason})";
 
-        // The request engine polls both the ATC-state signature and the request context on
-        // the same tick. Cache one consistent snapshot per published state version so both
-        // checks see the same frame without cloning the whole aircraft state twice.
+        // The request engine polls the ATC-state signature first and the request context
+        // second on the same probe tick. Reuse that one fresh snapshot for both callbacks
+        // so a radio tune or clearance change is judged against one coherent frame.
         AircraftState? liveSnapshot = null;
-        long liveVersion = -1;
-        AircraftState LiveSnapshot()
+        string LiveStateSignature()
         {
-            if (liveSnapshot == null || _aircraft.State.Version != liveVersion)
-            {
-                liveSnapshot = _aircraft.GetSnapshot();
-                liveVersion = liveSnapshot.Version;
-            }
+            liveSnapshot = _aircraft.GetSnapshot();
+            return StateSignature(liveSnapshot.ATC);
+        }
 
-            return liveSnapshot;
+        string CurrentContext()
+        {
+            var snapshotNow = liveSnapshot ?? _aircraft.GetSnapshot();
+            liveSnapshot = null;
+            return RequestContext(kind, snapshotNow, effectivePhase);
         }
         lock (_requestGate)
         {
             return _requests.Begin(kind, () => Accepted(kind), description, context,
-                () => StateSignature(LiveSnapshot().ATC),
-                () => !string.Equals(RequestContext(kind, LiveSnapshot(), effectivePhase), context,
+                () => LiveStateSignature(),
+                () => !string.Equals(CurrentContext(), context,
                     StringComparison.Ordinal),
                 () => MenuLinesFor(kind));
         }
