@@ -71,26 +71,41 @@ public enum TaxiPathType
 }
 
 public sealed class RunwayInfo
-{
-    public double Latitude { get; set; }
-    public double Longitude { get; set; }
-    public double AltitudeMeters { get; set; }
-    public double HeadingDegTrue { get; set; }
-    public double LengthMeters { get; set; }
-    public double WidthMeters { get; set; }
-    public double PatternAltitudeMeters { get; set; }
-    public double SlopeDegrees { get; set; }
+    {
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double AltitudeMeters { get; set; }
+        public double HeadingDegTrue { get; set; }
+        public double LengthMeters { get; set; }
+        public double WidthMeters { get; set; }
+        public double PatternAltitudeMeters { get; set; }
+        public double SlopeDegrees { get; set; }
+        public double TrueSlopeDegrees { get; set; }
+        public int Surface { get; set; }
 
-    public int PrimaryNumber { get; set; }
-    public int PrimaryDesignator { get; set; }
-    public int SecondaryNumber { get; set; }
-    public int SecondaryDesignator { get; set; }
+        public int PrimaryNumber { get; set; }
+        public int PrimaryDesignator { get; set; }
+        public int SecondaryNumber { get; set; }
+        public int SecondaryDesignator { get; set; }
 
-    public string PrimaryIlsIcao { get; set; } = "";
-    public string SecondaryIlsIcao { get; set; } = "";
+        public string PrimaryIlsIcao { get; set; } = "";
+        public string PrimaryIlsRegion { get; set; } = "";
+        public char PrimaryIlsType { get; set; } = 'W';
+        public string SecondaryIlsIcao { get; set; } = "";
+        public string SecondaryIlsRegion { get; set; } = "";
+        public char SecondaryIlsType { get; set; } = 'W';
 
-    public string PrimaryName => RunwayName(PrimaryNumber, PrimaryDesignator);
-    public string SecondaryName => RunwayName(SecondaryNumber, SecondaryDesignator);
+        public int EdgeLights { get; set; }
+        public int CenterLights { get; set; }
+        public bool PrimaryClosed { get; set; }
+        public bool SecondaryClosed { get; set; }
+        public bool PrimaryTakeoff { get; set; }
+        public bool PrimaryLanding { get; set; }
+        public bool SecondaryTakeoff { get; set; }
+        public bool SecondaryLanding { get; set; }
+
+        public string PrimaryName => RunwayName(PrimaryNumber, PrimaryDesignator);
+        public string SecondaryName => RunwayName(SecondaryNumber, SecondaryDesignator);
 
     /// <summary>
     /// The runway records report the centre of the runway, not the thresholds, so the

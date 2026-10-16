@@ -69,16 +69,41 @@ public sealed class AirportFacilitiesLoader : IDisposable
         var def = AirportDefineId;
 
         _sc.AddToFacilityDefinition(def, "OPEN AIRPORT");
-        _sc.AddToFacilityDefinition(def, "ICAO");
-        _sc.AddToFacilityDefinition(def, "REGION");
-        _sc.AddToFacilityDefinition(def, "NAME64");
+        // The airport payload order is the one the MSFS 2024 docs publish for the AIRPORT
+        // entry point, field by field. LATITUDE comes first, so a definition that omitted
+        // it left ParseAirport reading the longitude as the latitude and every
+        // calibrated orientation wrong.
         _sc.AddToFacilityDefinition(def, "LATITUDE");
         _sc.AddToFacilityDefinition(def, "LONGITUDE");
         _sc.AddToFacilityDefinition(def, "ALTITUDE");
         _sc.AddToFacilityDefinition(def, "MAGVAR");
+        _sc.AddToFacilityDefinition(def, "NAME");
+        _sc.AddToFacilityDefinition(def, "NAME64");
+        _sc.AddToFacilityDefinition(def, "ICAO");
+        _sc.AddToFacilityDefinition(def, "REGION");
+        _sc.AddToFacilityDefinition(def, "TOWER_LATITUDE");
+        _sc.AddToFacilityDefinition(def, "TOWER_LONGITUDE");
+        _sc.AddToFacilityDefinition(def, "TOWER_ALTITUDE");
         _sc.AddToFacilityDefinition(def, "TRANSITION_ALTITUDE");
         _sc.AddToFacilityDefinition(def, "TRANSITION_LEVEL");
         _sc.AddToFacilityDefinition(def, "IS_CLOSED");
+        _sc.AddToFacilityDefinition(def, "COUNTRY");
+        _sc.AddToFacilityDefinition(def, "CITY_STATE");
+        _sc.AddToFacilityDefinition(def, "N_RUNWAYS");
+        _sc.AddToFacilityDefinition(def, "N_STARTS");
+        _sc.AddToFacilityDefinition(def, "N_FREQUENCIES");
+        _sc.AddToFacilityDefinition(def, "N_HELIPADS");
+        _sc.AddToFacilityDefinition(def, "N_APPROACHES");
+        _sc.AddToFacilityDefinition(def, "N_DEPARTURES");
+        _sc.AddToFacilityDefinition(def, "N_ARRIVALS");
+        _sc.AddToFacilityDefinition(def, "N_TAXI_POINTS");
+        _sc.AddToFacilityDefinition(def, "N_TAXI_PARKINGS");
+        _sc.AddToFacilityDefinition(def, "N_TAXI_PATHS");
+        _sc.AddToFacilityDefinition(def, "N_TAXI_NAMES");
+        _sc.AddToFacilityDefinition(def, "N_JETWAYS");
+        _sc.AddToFacilityDefinition(def, "N_VDGS");
+        _sc.AddToFacilityDefinition(def, "N_HOLDING_PATTERNS");
+        _sc.AddToFacilityDefinition(def, "CLOSE AIRPORT");
 
         // Runways: needed for heading, length and runway-end identification.
         _sc.AddToFacilityDefinition(def, "OPEN RUNWAY");
@@ -90,12 +115,26 @@ public sealed class AirportFacilitiesLoader : IDisposable
         _sc.AddToFacilityDefinition(def, "WIDTH");
         _sc.AddToFacilityDefinition(def, "PATTERN_ALTITUDE");
         _sc.AddToFacilityDefinition(def, "SLOPE");
+        _sc.AddToFacilityDefinition(def, "TRUE_SLOPE");
+        _sc.AddToFacilityDefinition(def, "SURFACE");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_ILS_ICAO");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_ILS_REGION");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_ILS_TYPE");
         _sc.AddToFacilityDefinition(def, "PRIMARY_NUMBER");
         _sc.AddToFacilityDefinition(def, "PRIMARY_DESIGNATOR");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_ILS_ICAO");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_ILS_REGION");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_ILS_TYPE");
         _sc.AddToFacilityDefinition(def, "SECONDARY_NUMBER");
         _sc.AddToFacilityDefinition(def, "SECONDARY_DESIGNATOR");
-        _sc.AddToFacilityDefinition(def, "PRIMARY_ILS_ICAO");
-        _sc.AddToFacilityDefinition(def, "SECONDARY_ILS_ICAO");
+        _sc.AddToFacilityDefinition(def, "EDGE_LIGHTS");
+        _sc.AddToFacilityDefinition(def, "CENTER_LIGHTS");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_CLOSED");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_CLOSED");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_TAKEOFF");
+        _sc.AddToFacilityDefinition(def, "PRIMARY_LANDING");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_TAKEOFF");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_LANDING");
         _sc.AddToFacilityDefinition(def, "CLOSE RUNWAY");
 
         // Taxiway names, used to render ATC taxi route strings.
@@ -207,21 +246,53 @@ public sealed class AirportFacilitiesLoader : IDisposable
     {
         var r = new FacilityPayloadReader(rec.Payload);
         var a = req.Airport;
-        a.Icao = r.ReadString(8);
-        a.Region = r.ReadString(8);
-        a.Name = r.ReadString(64);
+        // The airport payload order is the one the MSFS 2024 docs publish for the AIRPORT
+        // entry point, field by field. LATITUDE comes first, so a definition that omitted
+        // it left ParseAirport reading the longitude as the latitude and every
+        // calibrated orientation wrong.
         a.ReferenceLatitude = r.ReadFloat64();
         a.ReferenceLongitude = r.ReadFloat64();
         a.ReferenceAltitudeMeters = r.ReadFloat64();
         a.MagneticVariationDeg = r.ReadFloat32();
+        a.Name = r.ReadString(64);
+        r.ReadString(64); // NAME64 - the same name in the 64-char form
+        a.Icao = r.ReadString(8);
+        a.Region = r.ReadString(8);
+        r.ReadFloat64(); // TOWER_LATITUDE
+        r.ReadFloat64(); // TOWER_LONGITUDE
+        r.ReadFloat64(); // TOWER_ALTITUDE
         a.TransitionAltitudeMeters = r.ReadFloat32();
         a.TransitionLevelMeters = r.ReadFloat32();
         a.IsClosed = r.ReadInt8() != 0;
+        r.ReadString(256); // COUNTRY
+        r.ReadString(256); // CITY_STATE
+        r.ReadInt32(); // N_RUNWAYS
+        r.ReadInt32(); // N_STARTS
+        r.ReadInt32(); // N_FREQUENCIES
+        r.ReadInt32(); // N_HELIPADS
+        r.ReadInt32(); // N_APPROACHES
+        r.ReadInt32(); // N_DEPARTURES
+        r.ReadInt32(); // N_ARRIVALS
+        r.ReadInt32(); // N_TAXI_POINTS
+        r.ReadInt32(); // N_TAXI_PARKINGS
+        r.ReadInt32(); // N_TAXI_PATHS
+        r.ReadInt32(); // N_TAXI_NAMES
+        r.ReadInt32(); // N_JETWAYS
+        r.ReadInt32(); // N_VDGS
+        r.ReadInt32(); // N_HOLDING_PATTERNS
     }
 
     private static void ParseRunway(FacilityDataRecord rec, PendingAirportRequest req)
     {
         var r = new FacilityPayloadReader(rec.Payload);
+        // The runway payload order is the one the MSFS 2024 docs publish for the RUNWAY
+        // child of AIRPORT, field by field. LATITUDE comes first, so a definition that
+        // omitted it left ParseRunway reading the longitude as the latitude and every
+        // runway position wrong.
+        var primaryIlsRegion = r.ReadString(8);
+        var primaryIlsType = (char)r.ReadInt32();
+        var secondaryIlsRegion = r.ReadString(8);
+        var secondaryIlsType = (char)r.ReadInt32();
         var rw = new RunwayInfo
         {
             Latitude = r.ReadFloat64(),
@@ -232,12 +303,26 @@ public sealed class AirportFacilitiesLoader : IDisposable
             WidthMeters = r.ReadFloat32(),
             PatternAltitudeMeters = r.ReadFloat32(),
             SlopeDegrees = r.ReadFloat32(),
+            TrueSlopeDegrees = r.ReadFloat32(),
+            Surface = r.ReadInt32(),
+            PrimaryIlsIcao = r.ReadString(8),
+            PrimaryIlsRegion = primaryIlsRegion,
+            PrimaryIlsType = primaryIlsType,
             PrimaryNumber = r.ReadInt32(),
             PrimaryDesignator = r.ReadInt32(),
+            SecondaryIlsIcao = r.ReadString(8),
+            SecondaryIlsRegion = secondaryIlsRegion,
+            SecondaryIlsType = secondaryIlsType,
             SecondaryNumber = r.ReadInt32(),
             SecondaryDesignator = r.ReadInt32(),
-            PrimaryIlsIcao = r.ReadString(8),
-            SecondaryIlsIcao = r.ReadString(8)
+            EdgeLights = r.ReadInt8(),
+            CenterLights = r.ReadInt8(),
+            PrimaryClosed = r.ReadInt8() != 0,
+            SecondaryClosed = r.ReadInt8() != 0,
+            PrimaryTakeoff = r.ReadInt8() != 0,
+            PrimaryLanding = r.ReadInt8() != 0,
+            SecondaryTakeoff = r.ReadInt8() != 0,
+            SecondaryLanding = r.ReadInt8() != 0,
         };
         req.Airport.Runways.Add(rw);
     }

@@ -1057,19 +1057,20 @@ internal struct SIMCONNECT_RECV_OPEN
     public uint dwApplicationVersionMajor;
     public uint dwApplicationVersionMinor;
     public uint dwApplicationBuildMajor;
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    internal struct SIMCONNECT_RECV_FACILITY_DATA_END
+    {
+        public uint dwSize;
+        public uint dwVersion;
+        public uint dwID;
+        public uint RequestId;
+    }
+
     public uint dwApplicationBuildMinor;
     public uint dwSimConnectVersionMajor;
     public uint dwSimConnectVersionMinor;
     public uint dwSimConnectBuildMajor;
     public uint dwSimConnectBuildMinor;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-internal struct SIMCONNECT_RECV_QUIT
-{
-    public uint dwSize;
-    public uint dwVersion;
-    public uint dwID;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]

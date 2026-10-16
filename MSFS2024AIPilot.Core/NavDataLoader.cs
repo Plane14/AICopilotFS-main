@@ -33,6 +33,9 @@ public sealed class NavDataLoader : IDisposable
     private readonly Dictionary<string, AirportApproaches> _airports = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, NavFix> _fixes = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _fixLookupFailed = new(StringComparer.OrdinalIgnoreCase);
+    // Counts how many of a fix's three lookups (waypoint, NDB, VOR) have ended. A fix is
+    // only recorded as unknown when every one of them has ended without an answer.
+    private readonly Dictionary<string, int> _fixEndedRequests = new(StringComparer.OrdinalIgnoreCase);
     private uint _nextRequestId = 8200;
     private bool _definitionsBuilt;
 
@@ -172,7 +175,24 @@ public sealed class NavDataLoader : IDisposable
         {
             _pending.Remove(stale.requestId);
 
-            if (stale.RequestType == PendingNavRequestKind.Approach)
+            if (stale.RequestType == PendingNavRequestKind.Fix)
+            {
+                var key = stale.Icao;
+                if (_fixEndedRequests.ContainsKey(key))
+                    _fixEndedRequests[key] = _fixEndedRequests[key] + 1;
+                else
+                    _fixEndedRequests[key] = 1;
+
+                var stillOutstanding = _pending.Values.Any(p =>
+                    p.RequestType == PendingNavRequestKind.Fix &&
+                    string.Equals(p.Icao, key, StringComparison.OrdinalIgnoreCase));
+
+                if (!_fixes.ContainsKey(key) && !stillOutstanding)
+                {
+                    _fixLookupFailed.Add(key);
+                }
+            }
+            else
             {
                 // Whatever did arrive for that request is still worth following, so the
                 // outstanding set is emptied rather than left waiting for an answer that
@@ -287,16 +307,29 @@ public sealed class NavDataLoader : IDisposable
         // MAGVAR sits after ICAO in every AIRPORT record; leaving it out here left this
         // definition's airport payload 4 bytes short of what ParseAirport reads, so every
         // transition parse threw and its magnetic variation was dropped.
+        //
+        // The APPROACH_TRANSITION payload order is exactly the one the MSFS 2024 docs
+        // publish: TYPE, IAF_ICAO, IAF_REGION, IAF_TYPE, IAF_ALTITUDE, DME_ARC_ICAO,
+        // DME_ARC_REGION, DME_ARC_TYPE, DME_ARC_RADIAL, DME_ARC_DISTANCE, NAME,
+        // N_APPROACH_LEGS, then the APPROACH_LEG child. Getting the order wrong is silent
+        // garbage rather than an error, which is why the parser is pinned by tests.
         var transition = new List<string> { "OPEN AIRPORT", "ICAO", "MAGVAR", "OPEN APPROACH" };
         transition.AddRange(ApproachFields());
         transition.AddRange(new[]
         {
             "OPEN APPROACH_TRANSITION",
-            "NAME",
+            "TYPE",
             "IAF_ICAO",
             "IAF_REGION",
             "IAF_TYPE",
             "IAF_ALTITUDE",
+            "DME_ARC_ICAO",
+            "DME_ARC_REGION",
+            "DME_ARC_TYPE",
+            "DME_ARC_RADIAL",
+            "DME_ARC_DISTANCE",
+            "NAME",
+            "N_APPROACH_LEGS",
             "OPEN APPROACH_LEG"
         });
         transition.AddRange(LegFields());
@@ -329,6 +362,12 @@ public sealed class NavDataLoader : IDisposable
         // and then open NDB and VOR in the same definition, and the simulator refused the
         // second entry point - so every NDB and VOR field failed and an NDB or VOR fix
         // never resolved, which left the route holding a hole it never filled.
+        //
+        // The NDB and VOR payloads carry every field the MSFS 2024 docs publish for them.
+        // The fix lookup only reads the position (LATITUDE/LONGITUDE/ALTITUDE for NDB,
+        // VOR_LATITUDE/VOR_LONGITUDE/VOR_ALTITUDE for VOR), so the extra fields are
+        // requested but ignored; a definition that omits them is answered field by field
+        // with DATA_ERROR and the fix never resolves.
         return new[]
         {
             new FacilityDefinition(ApproachDefineId, approachHeader),
@@ -341,11 +380,20 @@ public sealed class NavDataLoader : IDisposable
             }),
             new FacilityDefinition(NdbDefineId, new[]
             {
-                "OPEN NDB", "LATITUDE", "LONGITUDE", "ALTITUDE", "CLOSE NDB"
+                "OPEN NDB", "LATITUDE", "LONGITUDE", "ALTITUDE", "FREQUENCY", "TYPE", "RANGE",
+                "MAGVAR", "IS_TERMINAL_NDB", "NAME", "BFO_REQUIRED", "CLOSE NDB"
             }),
             new FacilityDefinition(VorDefineId, new[]
             {
-                "OPEN VOR", "VOR_LATITUDE", "VOR_LONGITUDE", "VOR_ALTITUDE", "CLOSE VOR"
+                "OPEN VOR", "VOR_LATITUDE", "VOR_LONGITUDE", "VOR_ALTITUDE",
+                "DME_LATITUDE", "DME_LONGITUDE", "DME_ALTITUDE",
+                "GS_LATITUDE", "GS_LONGITUDE", "GS_ALTITUDE",
+                "TACAN_LATITUDE", "TACAN_LONGITUDE", "TACAN_ALTITUDE",
+                "IS_NAV", "IS_DME", "IS_TACAN", "HAS_GLIDE_SLOPE",
+                "DME_AT_NAV", "DME_AT_GLIDE_SLOPE", "HAS_BACK_COURSE",
+                "FREQUENCY", "TYPE", "NAV_RANGE", "MAGVAR",
+                "LOCALIZER", "LOCALIZER_WIDTH", "GLIDE_SLOPE", "NAME",
+                "DME_BIAS", "LS_CATEGORY", "IS_TRUE_REFERENCED", "CLOSE VOR"
             })
         };
     }
@@ -556,16 +604,22 @@ public sealed class NavDataLoader : IDisposable
         if (!_pending.TryGetValue(userRequestId, out var request)) return;
         _pending.Remove(userRequestId);
 
+        // Track which of a fix's three lookups has ended. One fix is asked of three
+        // definitions (waypoint, NDB, VOR), and the first end message must not record
+        // the fix as unknown while the other two are still in flight - an NDB fix would
+        // be discarded by the waypoint request's "not found" while the NDB answer was
+        // on its way. The failure is recorded only when every request for that fix has
+        // ended without an answer.
         if (request.RequestType == PendingNavRequestKind.Fix)
         {
             var key = request.Icao;
-            // One fix is asked of three definitions. The first end message must not
-            // record the fix as unknown while the other two are still in flight, or an
-            // NDB fix would be discarded by the waypoint request's "not found" while
-            // the NDB answer was on its way.
+            if (_fixEndedRequests.ContainsKey(key))
+                _fixEndedRequests[key] = _fixEndedRequests[key] + 1;
+            else
+                _fixEndedRequests[key] = 1;
+
             var stillOutstanding = _pending.Values.Any(p =>
                 p.RequestType == PendingNavRequestKind.Fix &&
-                p.requestId != request.requestId &&
                 string.Equals(p.Icao, key, StringComparison.OrdinalIgnoreCase));
 
             if (!_fixes.ContainsKey(key) && !stillOutstanding)
