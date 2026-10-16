@@ -403,12 +403,21 @@ public sealed class AtcCommunicationHub : IDisposable
         var context = RequestContext(kind, snapshot, effectivePhase);
         var description = reason == null ? label : $"{label} ({reason})";
 
-        // The request engine needs a fresh, consistent view of the ATC block every time it
-        // polls: a station change or a newly granted clearance is the whole point of the
-        // probe. Read a new snapshot for each poll rather than closing over the first one,
-        // or a menu line that tuned the radio would never change the request context and
-        // the probe would keep walking a menu that had already changed underneath it.
-        AircraftState LiveSnapshot() => _aircraft.GetSnapshot();
+        // The request engine polls both the ATC-state signature and the request context on
+        // the same tick. Cache one consistent snapshot per published state version so both
+        // checks see the same frame without cloning the whole aircraft state twice.
+        AircraftState? liveSnapshot = null;
+        long liveVersion = -1;
+        AircraftState LiveSnapshot()
+        {
+            if (liveSnapshot == null || _aircraft.State.Version != liveVersion)
+            {
+                liveSnapshot = _aircraft.GetSnapshot();
+                liveVersion = liveSnapshot.Version;
+            }
+
+            return liveSnapshot;
+        }
         lock (_requestGate)
         {
             return _requests.Begin(kind, () => Accepted(kind), description, context,
