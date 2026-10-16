@@ -793,6 +793,18 @@ public class AtcCommunicationHubTests : IDisposable
         return hub;
     }
 
+    private (AtcCommunicationHub hub, AircraftController aircraft) NativeHub(Action<AircraftState>? configure = null)
+    {
+        var aircraft = new AircraftController();
+        configure?.Invoke(aircraft.State);
+
+        var hub = new AtcCommunicationHub(aircraft,
+            new AtcOptions { PreferredSource = AtcSource.Native, LogDirectoryOverride = _root },
+            _ => { });
+        hub.Start();
+        return (hub, aircraft);
+    }
+
     [Fact]
     public void BeyondAtcFactsAreReadFromItsLog()
     {
@@ -888,6 +900,54 @@ public class AtcCommunicationHubTests : IDisposable
         Assert.Contains(instructions, i => i == instruction);
         Assert.True(instruction.ClearedToLand);
         Assert.Equal("25L", instruction.Runway);
+    }
+
+    [Fact]
+    public void AStationChangeBypassesTheAutoRequestCooldown()
+    {
+        var (hub, aircraft) = NativeHub(state =>
+        {
+            state.ATC.AirportIsTowered = true;
+            state.ATC.CurrentFrequency = "124.850";
+            state.ATC.StationType = "ACTIVE COM";
+            state.ATC.StationIdent = "LISBON";
+        });
+        using var _ = hub;
+
+        hub.UpdatePhaseRequests(FlightPhase.TaxiOut, aircraft.GetSnapshot());
+        Assert.True(hub.Requests.IsBusy);
+
+        hub.Requests.Cancel();
+        aircraft.State.ATC.CurrentFrequency = "121.755";
+        aircraft.State.ATC.StationType = "GND";
+        aircraft.State.ATC.StationIdent = "LPPT";
+
+        hub.UpdatePhaseRequests(FlightPhase.TaxiOut, aircraft.GetSnapshot());
+
+        Assert.True(hub.Requests.IsBusy);
+        Assert.Equal(AtcRequestKind.Taxi, hub.Requests.ActiveKind);
+    }
+
+    [Fact]
+    public void TheAutoRequestCooldownStillAppliesWhileTheContextIsUnchanged()
+    {
+        var (hub, aircraft) = NativeHub(state =>
+        {
+            state.ATC.AirportIsTowered = true;
+            state.ATC.CurrentFrequency = "124.850";
+            state.ATC.StationType = "ACTIVE COM";
+            state.ATC.StationIdent = "LISBON";
+        });
+        using var _ = hub;
+
+        hub.UpdatePhaseRequests(FlightPhase.TaxiOut, aircraft.GetSnapshot());
+        Assert.True(hub.Requests.IsBusy);
+
+        hub.Requests.Cancel();
+        hub.UpdatePhaseRequests(FlightPhase.TaxiOut, aircraft.GetSnapshot());
+
+        Assert.False(hub.Requests.IsBusy);
+        Assert.Equal(AtcRequestStatus.Cancelled, hub.Requests.Status);
     }
 
     private static AircraftState Approaching() => new()
