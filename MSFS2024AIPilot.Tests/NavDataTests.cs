@@ -212,6 +212,27 @@ internal static class NavPayloadBuilder
     }
 }
 
+public class NavDataLoaderErrorFilterTests
+{
+    [Fact]
+    public void FacilityDefinitionErrorsAreRecognisedAsNavDataErrors()
+    {
+        Assert.True(NavDataLoader.IsNavDataSimConnectError(
+            "SimConnect exception: NAME_UNRECOGNIZED (sendId=1, index=2) [add facility field 'TYPE' to definition 8101]"));
+        Assert.True(NavDataLoader.IsNavDataSimConnectError(
+            "SimConnect exception: ERROR (sendId=2, index=2) [request facility data for 'KJFK' (definition 8105, request 8201)]"));
+    }
+
+    [Fact]
+    public void UnrelatedChecklistEventErrorsAreNotReportedAsNavDataErrors()
+    {
+        Assert.False(NavDataLoader.IsNavDataSimConnectError(
+            "SimConnect exception: NAME_UNRECOGNIZED (sendId=558, index=2) [map event 'MASTER_ALTERNATOR_SET' to id 1011]"));
+        Assert.False(NavDataLoader.IsNavDataSimConnectError(
+            "SimConnect exception: ERROR (sendId=559, index=2) [transmit event 'MASTER_ALTERNATOR_SET' (data=1)]"));
+    }
+}
+
 /// <summary>
 /// The approach record layout: TYPE, SUFFIX, RUNWAY_NUMBER, RUNWAY_DESIGNATOR, FAF,
 /// MISSED_ALTITUDE (in feet), the capability flags and the leg counts.
@@ -1343,6 +1364,5 @@ public class NavFacilityDefinitionTests
         }
     }
 }
-
 
 

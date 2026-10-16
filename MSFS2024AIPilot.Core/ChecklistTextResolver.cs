@@ -99,6 +99,9 @@ public static class ChecklistTextResolver
         Reg("BATTERY", battery);
         RegAliases(new[] { "BATT", "BATTERY SWITCH", "MASTER BATTERY", "MASTER SWITCH", "BATTERY 1", "BATTERIES", "BATTERY MASTER" }, battery);
 
+        // The generic checklist's GENERATOR item is one alternator switch state. The
+        // executor confirms the current state before firing and never re-fires a toggle
+        // for the same item, so one alternator toggle is the portable binding here.
         var alternator = new SwitchBinding("GENERAL ENG MASTER ALTERNATOR:1")
         { OnEvents = { "TOGGLE_ALTERNATOR1" }, OffEvents = { "TOGGLE_ALTERNATOR1" } };
         Reg("ALTERNATOR", alternator);

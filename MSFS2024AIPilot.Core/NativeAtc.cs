@@ -307,6 +307,10 @@ public sealed class AtcRequestEngine
         public Func<bool>? CircumstanceChanged { get; init; }
         /// <summary>Menu lines a screen reader recognised as the question being asked.</summary>
         public Func<IReadOnlyList<int>>? MenuLines { get; init; }
+        /// <summary>One live ATC snapshot for this tick, shared by signature and context checks.</summary>
+        public Func<(string Signature, string Context)>? LiveState { get; init; }
+        public string CurrentSignature { get; set; } = "";
+        public string CurrentContext { get; set; } = "";
     }
 
     /// <summary>
@@ -318,11 +322,13 @@ public sealed class AtcRequestEngine
     /// thing; <paramref name="circumstanceChanged"/> aborts the probe when the situation
     /// the menu was opened for is no longer current; <paramref name="menuLines"/> supplies
     /// the lines an off-screen reader recognised as the question being asked, which are
-    /// tried before anything is pressed blind.
+    /// tried before anything is pressed blind. <paramref name="liveState"/> supplies one
+    /// coherent ATC snapshot for the current tick when the caller wants the signature and
+    /// the circumstance derived from the same frame.
     /// </summary>
     public bool Begin(AtcRequestKind kind, Func<bool> accepted, string description,
         string? context = null, Func<string>? stateSignature = null, Func<bool>? circumstanceChanged = null,
-        Func<IReadOnlyList<int>>? menuLines = null)
+        Func<IReadOnlyList<int>>? menuLines = null, Func<(string Signature, string Context)>? liveState = null)
     {
         if (_pending != null) return false;
 
@@ -334,11 +340,22 @@ public sealed class AtcRequestEngine
             Context = context ?? "",
             StateSignature = stateSignature,
             CircumstanceChanged = circumstanceChanged,
-            MenuLines = menuLines
+            MenuLines = menuLines,
+            LiveState = liveState
         };
         _startedUtc = _clock();
         _entryStartedUtc = _startedUtc;
-        _signatureBaseline = _pending.StateSignature?.Invoke() ?? "";
+        if (_pending.LiveState != null)
+        {
+            var polled = _pending.LiveState();
+            _pending.CurrentSignature = polled.Signature;
+            _pending.CurrentContext = polled.Context;
+            _signatureBaseline = polled.Signature;
+        }
+        else
+        {
+            _signatureBaseline = _pending.StateSignature?.Invoke() ?? "";
+        }
         _entryBlamed = false;
         _menuLines = null;
         _pressedLines.Clear();
@@ -374,6 +391,13 @@ public sealed class AtcRequestEngine
             return;
         }
 
+        if (_pending.LiveState != null)
+        {
+            var polled = _pending.LiveState();
+            _pending.CurrentSignature = polled.Signature;
+            _pending.CurrentContext = polled.Context;
+        }
+
         switch (Status)
         {
             case AtcRequestStatus.OpeningMenu:
@@ -400,9 +424,14 @@ public sealed class AtcRequestEngine
         if (UnintendedEffect())
             return;
 
-        if (_pending!.CircumstanceChanged != null && _pending.CircumstanceChanged())
+        var pending = _pending!;
+        var circumstanceChanged = pending.LiveState != null
+            ? !string.IsNullOrEmpty(pending.Context) &&
+              !string.Equals(pending.CurrentContext, pending.Context, StringComparison.Ordinal)
+            : pending.CircumstanceChanged != null && pending.CircumstanceChanged();
+        if (circumstanceChanged)
         {
-            Fail($"circumstance changed while requesting {_pending.Description}");
+            Fail($"circumstance changed while requesting {pending.Description}");
             return;
         }
 
@@ -420,9 +449,9 @@ public sealed class AtcRequestEngine
     private bool UnintendedEffect()
     {
         var pending = _pending!;
-        if (_entryBlamed || ProbedEntry < 1 || pending.StateSignature == null) return false;
+        if (_entryBlamed || ProbedEntry < 1 || (pending.StateSignature == null && pending.LiveState == null)) return false;
 
-        var current = pending.StateSignature();
+        var current = pending.LiveState != null ? pending.CurrentSignature : pending.StateSignature!();
         if (string.Equals(current, _signatureBaseline, StringComparison.Ordinal)) return false;
 
         var line = ProbedEntry;
@@ -507,7 +536,9 @@ public sealed class AtcRequestEngine
         // The state immediately before the press is what this entry is judged against,
         // so anything that happened earlier - during the grace period, say - is absorbed
         // by the baseline and is not blamed on the entry.
-        if (_pending!.StateSignature != null)
+        if (_pending!.LiveState != null)
+            _signatureBaseline = _pending.CurrentSignature;
+        else if (_pending.StateSignature != null)
             _signatureBaseline = _pending.StateSignature();
 
         var eventIndex = MenuEventIndex(line);

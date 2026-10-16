@@ -27,6 +27,10 @@ public sealed class NavDataLoader : IDisposable
     private const uint WaypointDefineId = 8105;
     private const uint NdbDefineId = 8106;
     private const uint VorDefineId = 8107;
+    private static readonly uint[] NavDataDefinitionIds =
+    {
+        ApproachDefineId, TransitionDefineId, FinalLegDefineId, MissedLegDefineId, WaypointDefineId, NdbDefineId, VorDefineId
+    };
 
     private readonly SimConnectManager _sc;
     private readonly Dictionary<uint, PendingNavRequest> _pending = new();
@@ -636,10 +640,25 @@ public sealed class NavDataLoader : IDisposable
 
     private void OnSimConnectError(string message)
     {
-        // A named-field failure tells the definition was rejected. Log it, and drop the
-        // pending entry it belongs to: an exception is also the simulator's answer, and a
-        // request left pending held its slot until the timeout expired.
+        // The SimConnect connection is shared with the whole pilot. Only errors from the
+        // navdata facility definitions belong here; an unrelated checklist event failure
+        // otherwise lands in the log as a bogus [NavData] error and hides the real source.
+        if (!IsNavDataSimConnectError(message)) return;
         OnError?.Invoke($"[NavData] {message}");
+    }
+
+    internal static bool IsNavDataSimConnectError(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        if (message.Contains("facility", StringComparison.OrdinalIgnoreCase)) return true;
+
+        foreach (var defineId in NavDataDefinitionIds)
+        {
+            if (message.Contains($"definition {defineId}", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private AirportApproaches Container(string icao)

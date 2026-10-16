@@ -1008,6 +1008,19 @@ public class ChecklistTextResolverTests
     }
 
     [Fact]
+    public void Generator_UsesTheAlternatorToggleBinding()
+    {
+        var on = ChecklistTextResolver.Resolve("GENERATOR", "ON", Day);
+        Assert.False(on.IsManual);
+        Assert.Equal("GENERAL ENG MASTER ALTERNATOR:1", on.VerifySimVar);
+        Assert.Equal(new[] { ("TOGGLE_ALTERNATOR1", 1.0) }, on.Events);
+
+        var off = ChecklistTextResolver.Resolve("GENERATOR", "OFF", Day);
+        Assert.Equal(new[] { ("TOGGLE_ALTERNATOR1", 1.0) }, off.Events);
+        Assert.False(off.ExpectOn);
+    }
+
+    [Fact]
     public void Flaps_UseHandlePositions()
     {
         var up = ChecklistTextResolver.Resolve("FLAPS", "UP", Day);

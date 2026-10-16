@@ -111,6 +111,7 @@ public sealed class AtcCommunicationHub : IDisposable
 
     private DateTime _lastSourceCheckUtc = DateTime.MinValue;
     private DateTime _lastAutoRequestUtc = DateTime.MinValue;
+    private string? _lastAutoRequestContext;
     private DateTime _lastPollUtc = DateTime.MinValue;
     private FlightPhase _lastPhase = FlightPhase.Unknown;
     private string? _stationSignature;
@@ -402,18 +403,15 @@ public sealed class AtcCommunicationHub : IDisposable
         var context = RequestContext(kind, snapshot, effectivePhase);
         var description = reason == null ? label : $"{label} ({reason})";
 
-        // The engine's poll callbacks read this snapshot rather than the live state: the
-        // controller is decoding into AircraftState under its own lock from a different
-        // thread, so reading _aircraft.State inside a callback could mix fields from two
-        // frames. A torn signature then made the engine blame a menu entry for a change
-        // the simulation itself had made, and forbid that entry for the circumstance.
         lock (_requestGate)
         {
             return _requests.Begin(kind, () => Accepted(kind), description, context,
-                () => StateSignature(snapshot.ATC),
-                () => !string.Equals(RequestContext(kind, snapshot, effectivePhase), context,
-                    StringComparison.Ordinal),
-                () => MenuLinesFor(kind));
+                menuLines: () => MenuLinesFor(kind),
+                liveState: () =>
+                {
+                    var live = _aircraft.GetSnapshot();
+                    return (StateSignature(live.ATC), RequestContext(kind, live, effectivePhase));
+                });
         }
     }
 
@@ -648,7 +646,6 @@ public sealed class AtcCommunicationHub : IDisposable
 
         if (snapshot.Pushback.Attached || !atc.OnParkingSpot) PushbackRequested = false;
 
-        if (DateTime.UtcNow - _lastAutoRequestUtc < Options.RequestCooldown) return;
         if (_requests.IsBusy) return;
 
         switch (phase)
@@ -683,7 +680,15 @@ public sealed class AtcCommunicationHub : IDisposable
 
         void Try(AtcRequestKind kind, string reason)
         {
-            if (Request(kind, reason, phase)) _lastAutoRequestUtc = DateTime.UtcNow;
+            var context = RequestContext(kind, snapshot, phase);
+            var contextChanged = !string.Equals(context, _lastAutoRequestContext, StringComparison.Ordinal);
+            if (!contextChanged && DateTime.UtcNow - _lastAutoRequestUtc < Options.RequestCooldown) return;
+
+            if (Request(kind, reason, phase))
+            {
+                _lastAutoRequestUtc = DateTime.UtcNow;
+                _lastAutoRequestContext = context;
+            }
         }
     }
 
