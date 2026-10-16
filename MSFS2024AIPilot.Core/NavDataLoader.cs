@@ -27,6 +27,10 @@ public sealed class NavDataLoader : IDisposable
     private const uint WaypointDefineId = 8105;
     private const uint NdbDefineId = 8106;
     private const uint VorDefineId = 8107;
+    private static readonly uint[] NavDataDefinitionIds =
+    {
+        ApproachDefineId, TransitionDefineId, FinalLegDefineId, MissedLegDefineId, WaypointDefineId, NdbDefineId, VorDefineId
+    };
 
     private readonly SimConnectManager _sc;
     private readonly Dictionary<uint, PendingNavRequest> _pending = new();
@@ -648,8 +652,7 @@ public sealed class NavDataLoader : IDisposable
         if (string.IsNullOrWhiteSpace(message)) return false;
         if (message.Contains("facility", StringComparison.OrdinalIgnoreCase)) return true;
 
-        foreach (var defineId in new[]
-                 { ApproachDefineId, TransitionDefineId, FinalLegDefineId, MissedLegDefineId, WaypointDefineId, NdbDefineId, VorDefineId })
+        foreach (var defineId in NavDataDefinitionIds)
         {
             if (message.Contains($"definition {defineId}", StringComparison.OrdinalIgnoreCase))
                 return true;
