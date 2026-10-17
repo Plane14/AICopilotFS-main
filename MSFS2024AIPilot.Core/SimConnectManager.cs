@@ -671,9 +671,24 @@ public sealed partial class SimConnectManager : IDisposable
     {
         lock (_lock)
         {
-            SendNamed($"request system state '{stateName}' (request {requestId})", () =>
-                SimConnect_RequestSystemState(_handle, requestId, stateName));
+            var normalizedStateName = NormalizeSystemStateName(stateName);
+            SendNamed($"request system state '{normalizedStateName}' (request {requestId})", () =>
+                SimConnect_RequestSystemState(_handle, requestId, normalizedStateName));
         }
+    }
+
+    /// <summary>
+    /// SimConnect_RequestSystemState accepts a fixed list of names. "TITLE" appears in
+    /// older samples and wrappers but is not one of them in MSFS 2024; the equivalent
+    /// state is "AircraftLoaded", which returns the loaded aircraft identifier.
+    /// </summary>
+    internal static string NormalizeSystemStateName(string stateName)
+    {
+        if (string.Equals(stateName, "TITLE", StringComparison.OrdinalIgnoreCase))
+        {
+            return "AircraftLoaded";
+        }
+        return stateName;
     }
 
     /// <summary>Requests the title of the currently loaded user aircraft.</summary>
