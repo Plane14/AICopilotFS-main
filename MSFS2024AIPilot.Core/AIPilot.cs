@@ -773,7 +773,9 @@ public sealed class AIPilot : IDisposable
             return;
         }
 
-        // Auto-detect aircraft performance from installed aircraft configs + runtime SimVars
+        // Auto-detect aircraft performance from installed aircraft configs + runtime SimVars.
+        // This may run once before the first AircraftLoaded system-state response arrives;
+        // the title-change callback below reruns it when the actual title is known.
         DetectAircraftPerformance();
 
         // Reload the aircraft's own checklists whenever the loaded aircraft changes
@@ -781,6 +783,7 @@ public sealed class AIPilot : IDisposable
         _aircraft.OnAircraftTitleChanged += title =>
         {
             _aircraftTitle = title;
+            DetectAircraftPerformance();
             LoadAircraftChecklists(title);
         };
         LoadAircraftChecklists(_aircraft.AircraftTitle);
@@ -885,6 +888,14 @@ public sealed class AIPilot : IDisposable
             // 1) Runtime SimVar values (most accurate live data)
             var live = _aircraft.State;
             if (live.GrossWeight > 0) _perf.MaxGrossWeight = Math.Max(_perf.MaxGrossWeight, live.GrossWeight);
+
+            // A config lookup before the first AircraftLoaded callback has no aircraft
+            // identity and can only guess from fallback folders.
+            if (string.IsNullOrWhiteSpace(_aircraft.AircraftTitle))
+            {
+                Log("Aircraft title not available yet - waiting for AircraftLoaded system state");
+                return;
+            }
 
             // 2) Parse the installed aircraft configuration files
             var aircraftDir = FindUserAircraftDirectory();
