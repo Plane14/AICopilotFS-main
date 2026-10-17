@@ -1,13 +1,1 @@
-﻿## Build output
-bin/
-obj/
-publish/
-*.user
-*.suo
-
-## MSFS 2024 SDK (vendor toolchain, resolved locally at build time - see AGENTS.md)
-/MSFS 2024 SDK/
-
-## Logs and runtime artifacts
-*.log
-aipilot.log
+﻿
