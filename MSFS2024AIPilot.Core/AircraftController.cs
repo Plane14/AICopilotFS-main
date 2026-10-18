@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace MSFS2024AIPilot.Core;
@@ -14,49 +15,131 @@ public sealed class AircraftController
     private readonly SimConnectManager _sc = new();
     private AircraftState _state = new();
     private string _aircraftTitle = "";
+    private string _aircraftDirectory = ""; // Stores the directory from .air file path
     private readonly Dictionary<uint, string> _requestMap = new();
 
     private uint _reqPosition, _reqAttitude, _reqSpeeds, _reqEngines;
     private uint _reqEngineLimits;
     private uint _reqFuel, _reqAutopilot, _reqEnvironment, _reqNavigation, _reqNavRadio;
     private uint _reqSystems, _reqApModes, _reqCom;
-    private uint _reqAtc, _reqAtcText;
+    private uint _reqAtc, _reqAtcText, _reqTitle;
     private uint _reqWeather, _reqPushback;
     /// <summary>Definition ID of the ATC string block; string responses carry no request name.</summary>
     private uint _atcTextDefineId;
+    /// <summary>Definition ID of the TITLE SimVar; string responses carry no request name.</summary>
+    private uint _titleDefineId;
+
+    // Request IDs for our custom requests
+    private const uint REQUEST_USER_AIRCRAFT_TITLE = 90001;
+    private const uint EVENT_USER_AIRCRAFT_LOADED = 90002;
+    private const uint REQUEST_AIRCRAFT_TITLE = 90003; // For TITLE SimVar
 
     public event Action<AircraftState>? OnStateUpdated;
+    public event Action<string>? OnAircraftTitleChanged;
+    public event Action<string>? OnAircraftDirectoryChanged;
 
     public AircraftState State => _state;
     public SimConnectManager SimConnect => _sc;
     public string AircraftTitle => _aircraftTitle;
+    public string AircraftDirectory => _aircraftDirectory;
 
     public async System.Threading.Tasks.Task StartAsync()
     {
         await _sc.ConnectAsync();
         SetupDataDefinitions();
 
-        // Ask the sim for the loaded aircraft title once connected
+        // Ask the sim for the loaded aircraft info once connected
         _sc.SubscribeToSystemEvent(EVENT_USER_AIRCRAFT_LOADED, "AircraftLoaded");
         _sc.RequestUserAircraftTitle(REQUEST_USER_AIRCRAFT_TITLE);
+         
+        // Also request the TITLE SimVar for the aircraft title via string definition
+        _titleDefineId = _sc.CreateStringDataDefinition(("TITLE", DatumType.String256));
+        _reqTitle = _sc.RequestData(_titleDefineId, period: Period.Second);
     }
-
-    private const uint REQUEST_USER_AIRCRAFT_TITLE = 90001;
-    private const uint EVENT_USER_AIRCRAFT_LOADED = 90002;
-
-    public event Action<string>? OnAircraftTitleChanged;
 
     private void OnUserAircraftTitle(SystemStateData data)
     {
-        // RequestSystemState is a generic channel: only the response carrying our own
-        // request id is the aircraft title. Accepting any non-empty string retitles the
-        // aircraft with whatever else a system-state request returns.
         if (data.RequestId != REQUEST_USER_AIRCRAFT_TITLE) return;
-        if (!string.IsNullOrWhiteSpace(data.String) && data.String != _aircraftTitle)
+        if (string.IsNullOrWhiteSpace(data.String)) return;
+
+        var airPath = data.String;
+        var hintDir = Path.GetDirectoryName(airPath);
+        if (string.IsNullOrEmpty(hintDir)) return;
+
+        // Use the .air file path as a hint, but still go through the proper
+        // aircraft directory resolution to prefer VFS projection over LocalCache copies.
+        // If the title is already known we also resolve it directly so a valid TITLE
+        // update can populate the aircraft package even when the system-state path is
+        // slow or temporarily blank.
+        UpdateAircraftIdentity(hintDir, titleHint: _aircraftTitle);
+    }
+
+    private void UpdateAircraftIdentity(string? dirHint, string? titleHint = null)
+    {
+        string? resolvedDir = null;
+        if (!string.IsNullOrWhiteSpace(dirHint))
         {
-            _aircraftTitle = data.String;
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(string.Empty, dirHint);
+        }
+
+        if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleHint))
+        {
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint);
+        }
+
+        if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
+        {
+            _aircraftDirectory = resolvedDir;
+            OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
+        }
+
+        var titleFromCfg = resolvedDir is null ? null : ExtractAircraftTitleFromConfig(resolvedDir);
+        var resolvedTitle = !string.IsNullOrWhiteSpace(titleFromCfg)
+            ? titleFromCfg
+            : (!string.IsNullOrWhiteSpace(titleHint) ? titleHint : null);
+
+        if (!string.IsNullOrWhiteSpace(resolvedTitle) &&
+            !string.Equals(_aircraftTitle, resolvedTitle, StringComparison.OrdinalIgnoreCase))
+        {
+            _aircraftTitle = resolvedTitle;
             OnAircraftTitleChanged?.Invoke(_aircraftTitle);
         }
+    }
+
+    private string? ExtractAircraftTitleFromConfig(string aircraftDir)
+    {
+        try
+        {
+            var cfgPath = Path.Combine(aircraftDir, "aircraft.cfg");
+            if (!File.Exists(cfgPath)) return null;
+
+            var content = File.ReadAllText(cfgPath);
+            return ParseTitleFromAircraftCfg(content);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string? ParseTitleFromAircraftCfg(string content)
+    {
+        string? title = null;
+        foreach (var line in content.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith("title", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var eqIdx = trimmed.IndexOf('=');
+            if (eqIdx >= 0)
+            {
+                var value = trimmed.Substring(eqIdx + 1).Trim();
+                if (value.StartsWith("\"") && value.EndsWith("\"") && value.Length >= 2)
+                    value = value[1..^1];
+                title = value;
+            }
+        }
+        return title;
     }
 
     public void Stop()
@@ -584,13 +667,12 @@ public sealed class AircraftController
     }
 
     /// <summary>
-    /// Decodes the string-valued ATC SimVars. A field the sim reports as "None" is
+    /// Decodes string-valued SimVars: the ATC text block (9 fixed-width fields) and
+    /// the TITLE variable (single field). A field the sim reports as "None" is
     /// normalised to null so callers can test for an assignment with a single check.
     /// </summary>
     private void OnStringDataReceived(StringSimObjectData data)
     {
-        if (data.DefineId != _atcTextDefineId) return;
-
         string S(int i) => i < data.Values.Length ? data.Values[i] : "";
         string? OrNull(int i)
         {
@@ -600,19 +682,47 @@ public sealed class AircraftController
                 : value;
         }
 
-        lock (_stateLock)
+        if (data.DefineId == _titleDefineId)
         {
-            var atc = _state.ATC;
-            atc.DesignatedRunwayTakeoff = OrNull(0);
-            atc.DesignatedRunwayLanding = OrNull(1);
-            atc.DesignatedGateArrival = OrNull(2);
-            atc.DesignatedGateDeparture = OrNull(3);
-            atc.NextControllerName = OrNull(4);
-            atc.NextWaypointName = OrNull(5);
-            atc.AircraftIdent = OrNull(6);
-            atc.StationIdent = OrNull(7);
-            atc.StationType = OrNull(8);
-            atc.NativeStateUtc = DateTime.UtcNow;
+            var title = OrNull(0);
+            lock (_stateLock)
+            {
+                if (!string.IsNullOrWhiteSpace(title))
+                {
+                    if (!string.Equals(title, _aircraftTitle, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _aircraftTitle = title;
+                        OnAircraftTitleChanged?.Invoke(_aircraftTitle);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(_aircraftDirectory))
+                    {
+                        var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle);
+                        if (!string.IsNullOrWhiteSpace(dir))
+                        {
+                            _aircraftDirectory = dir;
+                            OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
+                        }
+                    }
+                }
+            }
+        }
+        else if (data.DefineId == _atcTextDefineId)
+        {
+            lock (_stateLock)
+            {
+                var atc = _state.ATC;
+                atc.DesignatedRunwayTakeoff = OrNull(0);
+                atc.DesignatedRunwayLanding = OrNull(1);
+                atc.DesignatedGateArrival = OrNull(2);
+                atc.DesignatedGateDeparture = OrNull(3);
+                atc.NextControllerName = OrNull(4);
+                atc.NextWaypointName = OrNull(5);
+                atc.AircraftIdent = OrNull(6);
+                atc.StationIdent = OrNull(7);
+                atc.StationType = OrNull(8);
+                atc.NativeStateUtc = DateTime.UtcNow;
+            }
         }
     }
 

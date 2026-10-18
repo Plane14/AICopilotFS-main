@@ -816,6 +816,38 @@ public class ChecklistParserTests
         }
     }
 
+    /// <summary>
+    /// The package folder is a slug (e.g. "asobo_b737max") while the sim publishes the
+    /// variation's title (e.g. "737 Max 8 Passengers"). Matching on the folder name alone
+    /// never finds the package, so the aircraft silently fell back to the generic flow.
+    /// </summary>
+    [Fact]
+    public void Parses2024Format_WhenFolderNameDiffersFromTitle()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "clslug_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            WriteAircraft(root, "asobo_b737max", Checklist2024Xml, LibraryXml);
+            File.WriteAllText(Path.Combine(root, "asobo_b737max", "aircraft.cfg"), """
+                [FLTSIM.0]
+                Title="Asobo 737 Max Common"
+                title = "737 Max 8 Passengers"
+                """);
+
+            // The title the sim publishes is the variation form, which only appears in the
+            // unquoted "title =" line: the quoted Title= above is the package's own name.
+            var set = ChecklistParser.ParseFromAircraft("737 Max 8 Passengers", rootOverride: root);
+
+            Assert.Equal(ChecklistSetFormat.Msfs2024Xml, set.Format);
+            Assert.True(set.IsAircraftSpecific);
+            Assert.NotNull(set.Find(ChecklistStep.PREFLIGHT_GATE));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
     [Theory]
     [InlineData("BEFORE STARTING ENGINES", ChecklistStep.PREFLIGHT_GATE)]
     [InlineData("BEFORE TAXI", ChecklistStep.PREFLIGHT_TAXI_OUT)]

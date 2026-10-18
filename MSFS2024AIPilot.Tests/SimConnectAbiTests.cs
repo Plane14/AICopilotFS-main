@@ -198,14 +198,4 @@ public class SimConnectReceiveAbiTests
         Assert.Equal(0x10u, (uint)EventFlags.GroupIdIsPriority);
         Assert.NotEqual(1u, (uint)EventFlags.GroupIdIsPriority);
     }
-
-    [Theory]
-    [InlineData("TITLE", "AircraftLoaded")]
-    [InlineData("title", "AircraftLoaded")]
-    [InlineData("AircraftLoaded", "AircraftLoaded")]
-    [InlineData("FlightPlan", "FlightPlan")]
-    public void RequestSystemStateNameNormalizationMatchesSimConnectNames(string input, string expected)
-    {
-        Assert.Equal(expected, SimConnectManager.NormalizeSystemStateName(input));
-    }
 }

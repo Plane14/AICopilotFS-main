@@ -10,56 +10,306 @@ namespace MSFS2024AIPilot.Core;
 
 /// <summary>
 /// Finds the installed aircraft package so checklists can be read from it.
-/// Uses the same Community-folder discovery as the aircraft profile loader.
+/// Uses the same MSFS install/VFS discovery as the aircraft profile loader.
 /// </summary>
 public static class AircraftPackageLocator
 {
-    public static List<string> CommunityRoots()
+    internal static List<string> SearchRoots() => new(MsfsInstallLayout.Discover().AircraftSearchRoots);
+
+    /// <summary>
+    /// Resolves the aircraft package directory. When <paramref name="rootOverride"/>
+    /// is provided (e.g. from the .air file path reported by the AircraftLoaded
+    /// system state), the filesystem scan is skipped entirely.
+    /// </summary>
+    public static string? LocateAircraftDirectory(string title, string? rootOverride = null)
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: false);
+
+    internal static string? LocateAircraftDirectoryForPerformance(string title, string? rootOverride = null)
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: true);
+
+    private static string? LocateAircraftDirectoryCore(string title, string? rootOverride, bool allowProfileFallback)
     {
-        var roots = new List<string>
+        var overrideDir = ResolveOverrideDirectory(rootOverride);
+        if (!string.IsNullOrEmpty(overrideDir))
+            return overrideDir;
+
+        // A supplied override is authoritative. If it does not resolve to a real
+        // aircraft package root, do not fall through to a broad Community scan: a
+        // helper or traffic folder can be a large tree and scanning it is exactly the
+        // false-positive path that caused the empty-pilot / generic-checklist state.
+        if (!string.IsNullOrWhiteSpace(rootOverride))
         {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages", "Microsoft.Limitless_8wekyb3d8bbwe", "LocalCache", "Packages", "Community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Microsoft Flight Simulator 2024", "Community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages", "Microsoft.Limitless_8wekyb3d8bbwe", "LocalState", "WASM", "Community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MSFS2024", "Community")
-        };
-        return roots.Where(Directory.Exists).Distinct().ToList();
+            if (string.IsNullOrWhiteSpace(title) || !Directory.Exists(rootOverride))
+                return null;
+
+            return LocateWithinOverrideRoot(title, rootOverride, allowProfileFallback);
+        }
+
+        if (string.IsNullOrWhiteSpace(title))
+            return null;
+
+        return LocateAcrossRoots(title, SearchRoots(), allowProfileFallback);
     }
 
-    /// <summary>Best-effort match of the loaded aircraft title to an installed folder.</summary>
-    public static string? LocateAircraftDirectory(string title, string? rootOverride = null)
+    private static string? LocateWithinOverrideRoot(string title, string rootOverride, bool allowProfileFallback)
     {
-        List<string> roots = rootOverride != null ? new() { rootOverride } : CommunityRoots();
-        foreach (var root in roots)
+        var normalizedTitle = Normalize(title);
+        var titleMatches = new List<string>();
+        var fallbackMatches = allowProfileFallback
+            ? new List<string>()
+            : null;
+
+        foreach (var cfg in SafeEnumerateFiles(rootOverride, "aircraft.cfg"))
+        {
+            var dir = Directory.GetParent(cfg);
+            if (dir is null || !MatchesAircraftTitle(cfg, title, normalizedTitle))
+                continue;
+
+            if (HasProfileContent(dir.FullName))
+                return dir.FullName;
+
+            titleMatches.Add(dir.FullName);
+        }
+
+        if (allowProfileFallback)
+        {
+            foreach (var candidate in EnumerateProfileCandidates(rootOverride))
+                fallbackMatches!.Add(candidate);
+        }
+
+        if (titleMatches.Count > 0)
+            return titleMatches[0];
+
+        if (fallbackMatches is { Count: > 0 })
+            return fallbackMatches[0];
+
+        return null;
+    }
+
+    private static string? LocateAcrossRoots(string title, IEnumerable<string> roots, bool allowProfileFallback)
+    {
+        var normalizedTitle = Normalize(title);
+        var titleMatches = new List<string>();
+        var fallbackMatches = allowProfileFallback
+            ? new List<string>()
+            : null;
+
+        foreach (var root in SearchRoots())
         {
             try
             {
-                foreach (var top in Directory.GetDirectories(root))
+                // Walk every aircraft directory and inspect its aircraft.cfg: the folder
+                // name is a package slug (e.g. "asobo_b737max") while the title the sim
+                // publishes is the variation's title (e.g. "737 Max 8 Passengers"), so
+                // matching on the folder name alone never finds the package.
+                foreach (var cfg in EnumerateAircraftConfigCandidates(root))
                 {
-                    if (!string.IsNullOrEmpty(title) &&
-                        (top.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         Normalize(top).Contains(Normalize(title))))
-                        return top;
+                    var dir = Directory.GetParent(cfg);
+                    if (dir is null) continue;
+                    if (!MatchesAircraftTitle(cfg, title, normalizedTitle))
+                        continue;
 
-                    var cfg = Path.Combine(top, "aircraft.cfg");
-                    if (File.Exists(cfg))
-                    {
-                        var content = File.ReadAllText(cfg);
-                        if (!string.IsNullOrEmpty(title) && content.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0)
-                            return top;
-                    }
+                    if (HasProfileContent(dir.FullName))
+                        return dir.FullName;
+
+                    titleMatches.Add(dir.FullName);
+                }
+
+                if (allowProfileFallback)
+                {
+                    foreach (var candidate in EnumerateProfileCandidates(root))
+                        fallbackMatches!.Add(candidate);
                 }
             }
             catch { }
         }
+
+        if (titleMatches.Count > 0)
+            return titleMatches[0];
+
+        if (fallbackMatches is { Count: > 0 })
+            return fallbackMatches[0];
+
         return null;
     }
 
+    private static bool MatchesAircraftTitle(string cfgPath, string title, string normalizedTitle)
+    {
+        try
+        {
+            var content = File.ReadAllText(cfgPath);
+            return content.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   ContainsTitle(content, normalizedTitle);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasProfileContent(string dir)
+        => File.Exists(Path.Combine(dir, "flight_model.cfg")) ||
+           File.Exists(Path.Combine(dir, "flight_performance.cfg")) ||
+           SafeEnumerateFiles(dir, "flight_model.cfg").Count > 0 ||
+           SafeEnumerateFiles(dir, "flight_performance.cfg").Count > 0;
+
+    private static IEnumerable<string> EnumerateProfileCandidates(string root)
+    {
+        if (IsProjectedSimObjectCollection(root))
+        {
+            foreach (var candidate in EnumerateProjectedProfileCandidates(root))
+                yield return candidate;
+            yield break;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pattern in new[] { "flight_performance.cfg", "flight_model.cfg" })
+        {
+            foreach (var file in SafeEnumerateFiles(root, pattern))
+            {
+                var dir = Directory.GetParent(file);
+                if (dir is not null && seen.Add(dir.FullName))
+                    yield return dir.FullName;
+            }
+        }
+    }
+
+    private static IEnumerable<string> EnumerateAircraftConfigCandidates(string root)
+    {
+        if (IsProjectedSimObjectCollection(root))
+        {
+            foreach (var dir in SafeEnumerateDirectories(root))
+            {
+                var cfg = Path.Combine(dir, "aircraft.cfg");
+                if (File.Exists(cfg))
+                    yield return cfg;
+            }
+            yield break;
+        }
+
+        foreach (var cfg in SafeEnumerateFiles(root, "aircraft.cfg"))
+            yield return cfg;
+    }
+
+    private static IEnumerable<string> EnumerateProjectedProfileCandidates(string root)
+    {
+        foreach (var dir in SafeEnumerateDirectories(root))
+        {
+            if (File.Exists(Path.Combine(dir, "flight_performance.cfg")) ||
+                File.Exists(Path.Combine(dir, "flight_model.cfg")))
+            {
+                yield return dir;
+            }
+        }
+    }
+
+    private static bool IsProjectedSimObjectCollection(string root)
+    {
+        var leaf = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return leaf.Equals("airplanes", StringComparison.OrdinalIgnoreCase) ||
+               leaf.Equals("groundvehicles", StringComparison.OrdinalIgnoreCase) ||
+               leaf.Equals("vehicles", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> SafeEnumerateDirectories(string root)
+    {
+        try
+        {
+            return Directory.GetDirectories(root);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private static string? ResolveOverrideDirectory(string? rootOverride)
+    {
+        if (string.IsNullOrWhiteSpace(rootOverride)) return null;
+
+        var candidate = rootOverride;
+        if (File.Exists(candidate))
+        {
+            var dir = Directory.GetParent(candidate);
+            if (dir is not null) candidate = dir.FullName;
+        }
+
+        if (!Directory.Exists(candidate)) return null;
+
+        // A raw .air or package hint is only valid when it resolves to a real aircraft
+        // root. Traffic / placeholder packages can also live under SimObjects\Airplanes,
+        // but a real aircraft package is recognised by its own aircraft.cfg directly in
+        // the candidate root. A recursive search is intentionally avoided here: a helper
+        // folder can be very large, and scanning every descendant to validate a directory
+        // is expensive and can hang when the override is not the current aircraft root.
+        if (File.Exists(Path.Combine(candidate, "aircraft.cfg")))
+            return candidate;
+
+        // Trim the candidate one level up when a path points to a descendant file or folder
+        // that is not itself the root but still belongs to the aircraft package.
+        for (int i = 0; i < 3; i++)
+        {
+            var parent = Directory.GetParent(candidate);
+            if (parent is null) break;
+            candidate = parent.FullName;
+            if (File.Exists(Path.Combine(candidate, "aircraft.cfg")))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// True when a normalized "title =" line in the cfg contains the normalized title.
+    /// The plain IndexOf above catches quoted titles like Title="Asobo 737 Max Common";
+    /// this catches the unquoted variation form title = "737 Max 8 Passengers".
+    /// </summary>
+    private static bool ContainsTitle(string content, string normalizedTitle)
+    {
+        foreach (var line in content.Split('\n'))
+        {
+            if (!line.TrimStart().StartsWith("title", StringComparison.OrdinalIgnoreCase)) continue;
+            if (Normalize(line).Contains(normalizedTitle)) return true;
+        }
+        return false;
+    }
+
     private static string Normalize(string s) => Regex.Replace(s.ToLowerInvariant(), "[^a-z0-9]", "");
+
+    private static List<string> SafeEnumerateFiles(string root, string pattern, int maxDepth = 6)
+    {
+        var results = new List<string>();
+        try
+        {
+            var stack = new Stack<(string Dir, int Depth)>();
+            stack.Push((root, 0));
+            while (stack.Count > 0)
+            {
+                var (dir, depth) = stack.Pop();
+                if (depth > maxDepth) continue;
+
+                string[]? files = null;
+                string[]? dirs = null;
+                try
+                {
+                    files = Directory.GetFiles(dir, pattern);
+                    dirs = Directory.GetDirectories(dir);
+                }
+                catch { continue; }
+
+                if (files != null) results.AddRange(files);
+                if (dirs != null)
+                {
+                    foreach (var d in dirs)
+                    {
+                        if (depth < maxDepth) stack.Push((d, depth + 1));
+                    }
+                }
+            }
+        }
+        catch { }
+        return results;
+    }
 }
 
 /// <summary>
@@ -85,7 +335,7 @@ public static class ChecklistParser
         var dir = AircraftPackageLocator.LocateAircraftDirectory(title, rootOverride);
         if (dir == null)
         {
-            set.Notes.Add("aircraft package folder not found in Community");
+            set.Notes.Add("aircraft package folder not found in the installed MSFS packages or VFS projection");
             return set;
         }
 

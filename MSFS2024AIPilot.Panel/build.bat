@@ -82,12 +82,37 @@ if not exist "%PANEL_DIR%Packages\msfs2024-ai-pilot" (
 )
 
 REM --- Install into the community folder ------------------------------------------
-set "COMMUNITY=%USERPROFILE%\AppData\Local\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages\Community"
+set "USERCFG="
+for %%F in (
+  "%APPDATA%\Microsoft Flight Simulator 2024\UserCfg.opt"
+  "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt"
+  "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\UserCfg.opt"
+) do (
+  if not defined USERCFG if exist "%%~F" set "USERCFG=%%~F"
+)
+
+set "PACKAGES_ROOT="
+if defined USERCFG (
+  for /f "usebackq tokens=1,* delims= " %%A in (`findstr /i /c:"InstalledPackagesPath" "%USERCFG%"`) do (
+    if /i "%%~A"=="InstalledPackagesPath" set "PACKAGES_ROOT=%%~B"
+  )
+)
+
+if not defined PACKAGES_ROOT (
+  set "PACKAGES_ROOT=%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages"
+)
+
+REM The SDK docs recommend Community2024 for MSFS 2024-only packages; Community remains
+REM as a compatibility fallback when a 2024-specific folder is not available.
+set "COMMUNITY=%PACKAGES_ROOT%\Community2024"
+if not exist "%COMMUNITY%" (
+  set "COMMUNITY=%PACKAGES_ROOT%\Community"
+)
 
 if not exist "%COMMUNITY%" (
-  echo ERROR: Community folder not found: %COMMUNITY%
+  echo ERROR: No Community2024 or Community folder was found under: %PACKAGES_ROOT%
   echo The package was built anyway. Copy "%PANEL_DIR%Packages\msfs2024-ai-pilot" into
-  echo your community folder by hand.
+  echo your active MSFS packages folder by hand.
   exit /b 1
 )
 

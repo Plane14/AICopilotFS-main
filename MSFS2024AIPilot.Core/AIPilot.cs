@@ -30,6 +30,7 @@ public sealed class AIPilot : IDisposable
     private readonly PhaseContext _phaseContext = new();
     private readonly Timer _mainLoopTimer;
     private readonly TimeSpan LoopInterval = TimeSpan.FromMilliseconds(50);
+    private bool _loopRunning;
     private readonly string _pipeName = "MSFS2024AIPilot.Delegation";
     private readonly CancellationTokenSource _cts = new();
     private Task? _pipeServerTask;
@@ -773,20 +774,39 @@ public sealed class AIPilot : IDisposable
             return;
         }
 
-        // Auto-detect aircraft performance from installed aircraft configs + runtime SimVars.
-        // This may run once before the first AircraftLoaded system-state response arrives;
-        // the title-change callback below reruns it when the actual title is known.
-        DetectAircraftPerformance();
-
         // Reload the aircraft's own checklists whenever the loaded aircraft changes
         // (the user can switch aircraft while the host keeps running).
+        // Handlers are registered BEFORE detection so they are ready to catch
+        // the AircraftLoaded/TITLE SimConnect responses, which trigger detection
+        // with a resolved directory path instead of a blocking filesystem scan.
         _aircraft.OnAircraftTitleChanged += title =>
         {
             _aircraftTitle = title;
-            DetectAircraftPerformance();
-            LoadAircraftChecklists(title);
+            // Resolve the package directory from the current title when the .air path is
+            // still pending. This keeps the checklist and performance profile loading in
+            // step with the simulator even when the TITLE SimVar arrives before the .air
+            // system-state path.
+            var dir = !string.IsNullOrEmpty(_aircraft.AircraftDirectory)
+                ? _aircraft.AircraftDirectory
+                : (!string.IsNullOrWhiteSpace(title) ? AircraftPackageLocator.LocateAircraftDirectory(title) : null);
+
+            if (!string.IsNullOrEmpty(dir))
+                LoadAircraftChecklists(title, dir);
+            else if (!string.IsNullOrWhiteSpace(title))
+                LoadAircraftChecklists(title);
         };
-        LoadAircraftChecklists(_aircraft.AircraftTitle);
+        _aircraft.OnAircraftDirectoryChanged += dir =>
+        {
+            // Directory resolved from the .air file path: re-detect performance and
+            // reload checklists against it without a filesystem scan.
+            DetectAircraftPerformance(dir);
+            LoadAircraftChecklists(_aircraftTitle, dir);
+        };
+        LoadAircraftChecklists(_aircraftTitle);
+
+        // Auto-detect aircraft performance is deferred to OnAircraftDirectoryChanged,
+        // which fires when SimConnect resolves the .air file path. This avoids a
+        // blocking recursive filesystem scan at startup.
 
         // ATC: the sim's own controller and BeyondATC both feed the same instruction
         // handler, so the flight logic stays independent of which one is talking.
@@ -845,13 +865,16 @@ public sealed class AIPilot : IDisposable
     /// actions, optionally referencing a checkpoint library); many stock and
     /// Community aircraft still use the legacy text format. When neither is
     /// readable, a built-in generic checklist keeps the flow running.
+    /// <param name="rootOverride">A pre-resolved aircraft package directory to avoid a filesystem scan.</param>
     /// </summary>
-    private void LoadAircraftChecklists(string title)
+    private void LoadAircraftChecklists(string title, string? rootOverride = null)
     {
-        if (string.IsNullOrWhiteSpace(title)) return;
+        // If we have a directory override (e.g. from OnAircraftDirectoryChanged), load checklists
+        // even with an empty title, since we know which aircraft directory to look in.
+        if (rootOverride == null && string.IsNullOrWhiteSpace(title)) return;
         try
         {
-            var parsed = ChecklistParser.ParseFromAircraft(title);
+            var parsed = ChecklistParser.ParseFromAircraft(title, rootOverride: rootOverride);
             AircraftChecklistSet set;
             if (parsed.IsLoaded)
             {
@@ -883,22 +906,19 @@ public sealed class AIPilot : IDisposable
 
     private void DetectAircraftPerformance()
     {
+        DetectAircraftPerformance(null);
+    }
+
+    private void DetectAircraftPerformance(string? overrideDir)
+    {
         try
         {
             // 1) Runtime SimVar values (most accurate live data)
             var live = _aircraft.State;
             if (live.GrossWeight > 0) _perf.MaxGrossWeight = Math.Max(_perf.MaxGrossWeight, live.GrossWeight);
 
-            // A config lookup before the first AircraftLoaded callback has no aircraft
-            // identity and can only guess from fallback folders.
-            if (string.IsNullOrWhiteSpace(_aircraft.AircraftTitle))
-            {
-                Log("Aircraft title not available yet - waiting for AircraftLoaded system state");
-                return;
-            }
-
             // 2) Parse the installed aircraft configuration files
-            var aircraftDir = FindUserAircraftDirectory();
+            var aircraftDir = overrideDir ?? FindUserAircraftDirectory();
             if (aircraftDir != null)
             {
                 var parsed = AircraftConfigParser.ParseAircraftConfig(aircraftDir);
@@ -992,120 +1012,13 @@ public sealed class AIPilot : IDisposable
     private string? FindUserAircraftDirectory()
     {
         _aircraftTitle = _aircraft.AircraftTitle;
-        var title = _aircraftTitle;
+        var dirOverride = _aircraft.AircraftDirectory;
+        if (string.IsNullOrWhiteSpace(_aircraftTitle) && string.IsNullOrWhiteSpace(dirOverride))
+            return null;
 
-        string[] roots =
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages", "Microsoft.Limitless_8wekyb3d8bbwe", "LocalState", "WASM", "Community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Microsoft Flight Simulator 2024", "Community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages", "Microsoft.Limitless_8wekyb3d8bbwe", "LocalCache", "community"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MSFS2024", "Community")
-        };
-
-        var candidates = new List<DirectoryInfo>();
-        // Directories matched through the loaded aircraft's own title. Kept apart from
-        // the fallbacks so an arbitrary Community aircraft is never merged into the
-        // performance profile of the one that is actually being flown: a wrong-but-nonzero
-        // value from the fallback wins in MergePerformance and then every V-speed is wrong.
-        var titleMatches = new List<DirectoryInfo>();
-
-        foreach (var root in roots)
-        {
-            if (!Directory.Exists(root)) continue;
-
-            // If we know the aircraft title, look for the matching aircraft.cfg
-            if (!string.IsNullOrEmpty(title))
-            {
-                var normalizedTitle = NormalizeForMatch(title);
-                foreach (var cfg in SafeEnumerateFiles(root, "aircraft.cfg"))
-                {
-                    try
-                    {
-                        var content = File.ReadAllText(cfg.FullName);
-                        if (content.Contains($"\"{title}\"", StringComparison.OrdinalIgnoreCase) ||
-                            content.Contains($"title=", StringComparison.OrdinalIgnoreCase) &&
-                            ContainsTitle(content, normalizedTitle))
-                        {
-                            var dir = Directory.GetParent(cfg.FullName);
-                            if (dir is null) continue;
-                            if (File.Exists(Path.Combine(dir.FullName, "flight_model.cfg")) ||
-                                SafeEnumerateFiles(dir.FullName, "flight_model.cfg").Count > 0)
-                            {
-                                return dir.FullName;
-                            }
-                            titleMatches.Add(dir);
-                        }
-                    }
-                    catch { }
-                }
-            }
-
-            // Fallback: first aircraft with a flight_performance.cfg (best performance data)
-            foreach (var f in SafeEnumerateFiles(root, "flight_performance.cfg"))
-            {
-                var dir = Directory.GetParent(f.FullName);
-                if (dir != null) candidates.Add(dir);
-            }
-            foreach (var f in SafeEnumerateFiles(root, "flight_model.cfg"))
-            {
-                var dir = Directory.GetParent(f.FullName);
-                if (dir != null) candidates.Add(dir);
-            }
-        }
-
-        // A title match always beats the fallback, even one found later in the walk: a
-        // flight_model.cfg directory found by scanning the Community folder is a guess,
-        // and a guess about the aircraft in use is worse than no profile at all.
-        if (titleMatches.Count > 0) return titleMatches[0].FullName;
-
-        return candidates.Count > 0 ? candidates[0].FullName : null;
-    }
-
-    private static bool ContainsTitle(string content, string normalizedTitle)
-    {
-        foreach (var line in content.Split('\n'))
-        {
-            if (!line.TrimStart().StartsWith("title", StringComparison.OrdinalIgnoreCase)) continue;
-            if (NormalizeForMatch(line).Contains(normalizedTitle)) return true;
-        }
-        return false;
-    }
-
-    private static string NormalizeForMatch(string s)
-    {
-        var sb = new System.Text.StringBuilder();
-        foreach (var c in s.ToLowerInvariant())
-        {
-            if (char.IsLetterOrDigit(c)) sb.Append(c);
-        }
-        return sb.ToString();
-    }
-
-    private static List<FileInfo> SafeEnumerateFiles(string root, string pattern)
-    {
-        var results = new List<FileInfo>();
-        try
-        {
-            var stack = new Stack<string>();
-            stack.Push(root);
-            while (stack.Count > 0)
-            {
-                var dir = stack.Pop();
-                FileInfo[]? files = null;
-                DirectoryInfo[]? dirs = null;
-                try { var di = new DirectoryInfo(dir); files = di.GetFiles(pattern); dirs = di.GetDirectories(); }
-                catch { continue; }
-
-                if (files != null) results.AddRange(files);
-                if (dirs != null) foreach (var d in dirs) stack.Push(d.FullName);
-            }
-        }
-        catch { }
-        return results;
+        // Performance discovery may fall back to the first package that actually carries
+        // flight-model/performance data, but only after a title/override match was tried.
+        return AircraftPackageLocator.LocateAircraftDirectoryForPerformance(_aircraftTitle, dirOverride);
     }
 
     public void Stop()
@@ -1121,6 +1034,8 @@ public sealed class AIPilot : IDisposable
 
     private void MainLoop(object? state)
     {
+        if (_loopRunning) return;
+        _loopRunning = true;
         var now = DateTime.UtcNow;
         var dt = (now - _lastFrame).TotalSeconds;
         _lastFrame = now;
@@ -1201,6 +1116,10 @@ public sealed class AIPilot : IDisposable
         catch (Exception ex)
         {
             Log($"Loop error: {ex}");
+        }
+        finally
+        {
+            _loopRunning = false;
         }
     }
 
@@ -4597,17 +4516,7 @@ public sealed class AIPilot : IDisposable
     {
         try
         {
-            var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            var baseDir = Path.Combine(roaming, "Microsoft Flight Simulator 2024", "LocalState");
-            var customFlight = Path.Combine(baseDir, "CUSTOMFLIGHT.PLN");
-            var msStore = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages", "Microsoft.Limitless_8wekyb3d8bbwe", "LocalState", "CUSTOMFLIGHT.PLN");
-
-            foreach (var p in new[] { customFlight, msStore })
-            {
-                if (File.Exists(p)) return p;
-            }
+            return MsfsInstallLayout.Discover().FindLatestFlightPlan();
         }
         catch { }
         return null;

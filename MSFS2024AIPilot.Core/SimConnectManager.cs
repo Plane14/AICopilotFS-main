@@ -92,24 +92,54 @@ public sealed partial class SimConnectManager : IDisposable
         lock (_lock)
         {
             if (_connected) return;
-
-            try
-            {
-                var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, IntPtr.Zero, 0);
-                if (hr != 0 || _handle == IntPtr.Zero)
-                {
-                    throw new SimConnectException($"SimConnect_Open failed with HRESULT 0x{hr:X8}. Ensure Microsoft Flight Simulator 2024 is running.");
-                }
-                _connected = true;
-            }
-            catch (DllNotFoundException ex)
-            {
-                throw new SimConnectException("SimConnect.dll not found. Ensure MSFS 2024 is installed.", ex);
-            }
         }
 
+        const int connectTimeoutSeconds = 30;
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(connectTimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        // SimConnect_Open is a blocking native call: if the simulator is not ready to
+        // accept a connection (not running, at the main menu, or mid-load) it can block
+        // indefinitely, and the native client spins while it waits. Run it on a thread
+        // pool thread and stop waiting after a timeout instead of hanging the process.
+        var openTask = Task.Run(() =>
+        {
+            lock (_lock)
+            {
+                if (_connected) return;
+                try
+                {
+                    var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, IntPtr.Zero, 0);
+                    if (hr != 0 || _handle == IntPtr.Zero)
+                    {
+                        throw new SimConnectException($"SimConnect_Open failed with HRESULT 0x{hr:X8}. Ensure Microsoft Flight Simulator 2024 is running.");
+                    }
+                    _connected = true;
+                }
+                catch (DllNotFoundException ex)
+                {
+                    throw new SimConnectException("SimConnect.dll not found. Ensure MSFS 2024 is installed.", ex);
+                }
+            }
+        });
+
+        var delay = Task.Delay(Timeout.InfiniteTimeSpan, linkedCts.Token);
+        var completed = await Task.WhenAny(openTask, delay);
+        if (completed != openTask)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException("SimConnect connection was cancelled.", cancellationToken);
+            }
+            throw new SimConnectException(
+                $"Timed out after {connectTimeoutSeconds} seconds while connecting to SimConnect. " +
+                "Ensure Microsoft Flight Simulator 2024 is running and you are in a flight - " +
+                "the SimConnect connection is not accepted at the main menu or while a flight is loading.");
+        }
+
+        await openTask; // propagate HRESULT / DllNotFound failures from SimConnect_Open
+
         OnConnected?.Invoke();
-        await Task.CompletedTask;
     }
 
     public void Disconnect()
@@ -671,24 +701,9 @@ public sealed partial class SimConnectManager : IDisposable
     {
         lock (_lock)
         {
-            var normalizedStateName = NormalizeSystemStateName(stateName);
-            SendNamed($"request system state '{normalizedStateName}' (request {requestId})", () =>
-                SimConnect_RequestSystemState(_handle, requestId, normalizedStateName));
+            SendNamed($"request system state '{stateName}' (request {requestId})", () =>
+                SimConnect_RequestSystemState(_handle, requestId, stateName));
         }
-    }
-
-    /// <summary>
-    /// SimConnect_RequestSystemState accepts a fixed list of names. "TITLE" appears in
-    /// older samples and wrappers but is not one of them in MSFS 2024; the equivalent
-    /// state is "AircraftLoaded", which returns the loaded aircraft identifier.
-    /// </summary>
-    internal static string NormalizeSystemStateName(string stateName)
-    {
-        if (string.Equals(stateName, "TITLE", StringComparison.OrdinalIgnoreCase))
-        {
-            return "AircraftLoaded";
-        }
-        return stateName;
     }
 
     /// <summary>Requests the title of the currently loaded user aircraft.</summary>
