@@ -7,8 +7,10 @@ REM therefore needs the game itself on this machine.
 setlocal enabledelayedexpansion
 
 set "PANEL_DIR=%~dp0"
-set "SDK_DIR=%MSFS_SDK%"
-if "%SDK_DIR%"=="" set "SDK_DIR=%PANEL_DIR%..\MSFS 2024 SDK"
+set "SDK_DIR=%MSFS2024_SDK%"
+if not defined SDK_DIR set "SDK_DIR=%MSFS_SDK%"
+if defined SDK_DIR if "%SDK_DIR:~-1%"=="\" set "SDK_DIR=%SDK_DIR:~0,-1%"
+if not defined SDK_DIR if exist "%PANEL_DIR%..\MSFS 2024 SDK\Tools\bin\fspackagetool.exe" set "SDK_DIR=%PANEL_DIR%..\MSFS 2024 SDK"
 set "PACKAGE_TOOL=%SDK_DIR%\Tools\bin\fspackagetool.exe"
 
 if not exist "%PACKAGE_TOOL%" (
@@ -16,8 +18,8 @@ if not exist "%PACKAGE_TOOL%" (
   REM only in the standalone SDK, so fall back to the Store lookup as a hint.
   echo ERROR: fspackagetool.exe was not found.
   echo.
-  echo Set the MSFS_SDK environment variable to your MSFS 2024 SDK folder, or put the
-  echo SDK in "%PANEL_DIR%..\MSFS 2024 SDK".
+  echo Set the MSFS2024_SDK or MSFS_SDK environment variable to your MSFS 2024 SDK
+  echo folder, or put the SDK in "%PANEL_DIR%..\MSFS 2024 SDK".
   exit /b 1
 )
 
@@ -65,7 +67,7 @@ echo Using MSFS 2024 at: %FS_EXE%
 
 REM --- Build ----------------------------------------------------------------------
 pushd "%PANEL_DIR%"
-"%PACKAGE_TOOL%" package.xml
+"%PACKAGE_TOOL%" package.xml -nopause
 if errorlevel 1 (
   echo.
   echo Package build failed. On a first run the tool builds its base packages before
@@ -82,7 +84,20 @@ if not exist "%PANEL_DIR%Packages\msfs2024-ai-pilot" (
 )
 
 REM --- Install into the community folder ------------------------------------------
-set "COMMUNITY=%USERPROFILE%\AppData\Local\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages\Community"
+set "PACKAGES_ROOT="
+for %%F in (
+  "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt"
+  "%APPDATA%\Microsoft Flight Simulator 2024\UserCfg.opt"
+) do (
+  if not defined PACKAGES_ROOT if exist "%%~F" call :read_installed_packages_path "%%~F"
+)
+
+if not defined PACKAGES_ROOT (
+  set "PACKAGES_ROOT=%USERPROFILE%\AppData\Local\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages"
+)
+
+set "COMMUNITY=%PACKAGES_ROOT%\Community"
+if exist "%PACKAGES_ROOT%\Community2024" set "COMMUNITY=%PACKAGES_ROOT%\Community2024"
 
 if not exist "%COMMUNITY%" (
   echo ERROR: Community folder not found: %COMMUNITY%
@@ -102,3 +117,9 @@ echo.
 echo Installed to: %COMMUNITY%\msfs2024-ai-pilot
 echo Enable the panel in MSFS under Options - General - Navigation - Instrument Panel Layout.
 endlocal
+goto :eof
+
+:read_installed_packages_path
+for /f "tokens=1,* delims= " %%A in ('findstr /b /c:"InstalledPackagesPath" "%~1"') do set "PACKAGES_ROOT=%%~B"
+if defined PACKAGES_ROOT set "PACKAGES_ROOT=!PACKAGES_ROOT:"=!"
+goto :eof

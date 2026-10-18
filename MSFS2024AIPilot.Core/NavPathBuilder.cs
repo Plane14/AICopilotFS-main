@@ -75,7 +75,8 @@ public static class NavPathBuilder
         // A MSFS 2024 plan names its fixes and publishes no positions, so each one is
         // asked for here. The lookups answer asynchronously and the route is rebuilt as
         // they do, which is why this is called again whenever navdata arrives.
-        foreach (var waypoint in nav.Waypoints) navData.RequestFix(waypoint.Ident);
+        foreach (var waypoint in nav.Waypoints.Where(ShouldRequestFixLookup))
+            navData.RequestFix(waypoint.Ident);
 
         return Build(
             nav,
@@ -85,6 +86,19 @@ public static class NavPathBuilder
             arrivalRunway,
             arrivalAirport,
             fix => navData.IsFixUnknown(fix));
+    }
+
+    /// <summary>
+    /// Whether this waypoint should be resolved through the fix database.
+    /// Airport/runway waypoints are not nav fixes and should not be requested as
+    /// WAYPOINT/NDB/VOR facilities.
+    /// </summary>
+    internal static bool ShouldRequestFixLookup(FlightPlanWaypoint waypoint)
+    {
+        if (string.IsNullOrWhiteSpace(waypoint.Ident)) return false;
+        if (waypoint.HasPosition) return false;
+
+        return waypoint.Type is not (WaypointType.Airport or WaypointType.Runway);
     }
 
     /// <summary>

@@ -817,6 +817,46 @@ public class MissedApproachTests
 /// </summary>
 public class NavPathBuilderTests
 {
+    [Fact]
+    public void AirportAndRunwayWaypointsAreNotRequestedAsFixLookups()
+    {
+        Assert.False(NavPathBuilder.ShouldRequestFixLookup(new FlightPlanWaypoint
+        {
+            Ident = "LECO",
+            Type = WaypointType.Airport,
+            Latitude = double.NaN,
+            Longitude = double.NaN
+        }));
+
+        Assert.False(NavPathBuilder.ShouldRequestFixLookup(new FlightPlanWaypoint
+        {
+            Ident = "25L",
+            Type = WaypointType.Runway,
+            Latitude = double.NaN,
+            Longitude = double.NaN
+        }));
+    }
+
+    [Fact]
+    public void OnlyUnplacedNavFixesAreRequestedAsFixLookups()
+    {
+        Assert.True(NavPathBuilder.ShouldRequestFixLookup(new FlightPlanWaypoint
+        {
+            Ident = "DAGGA",
+            Type = WaypointType.Intersection,
+            Latitude = double.NaN,
+            Longitude = double.NaN
+        }));
+
+        Assert.False(NavPathBuilder.ShouldRequestFixLookup(new FlightPlanWaypoint
+        {
+            Ident = "DAGGA",
+            Type = WaypointType.Intersection,
+            Latitude = 43.306,
+            Longitude = -8.377
+        }));
+    }
+
     private static NavigationState PlanWithNamedFixes(params string[] idents)
     {
         var nav = new NavigationState
@@ -1364,5 +1404,4 @@ public class NavFacilityDefinitionTests
         }
     }
 }
-
 

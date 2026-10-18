@@ -9,17 +9,21 @@
         dotnet build -p:MsfsSdkDir="C:\MSFS SDK"
       Search order:
         1. -p:MsfsSdkDir=... passed to the build
-        2. The "MSFS 2024 SDK" folder inside this repo
-        3. The SDK installed with MSFS 2024 (Microsoft Store install)
+        2. The official MSFS2024_SDK environment variable
+        3. The legacy MSFS_SDK environment variable
+        4. The "MSFS 2024 SDK" folder inside this repo
+        5. The SDK installed with MSFS 2024 (Microsoft Store install)
     -->
+    <MsfsSdkDir Condition=" '$(MsfsSdkDir)' == '' and '$(MSFS2024_SDK)' != '' ">$(MSFS2024_SDK)</MsfsSdkDir>
+    <MsfsSdkDir Condition=" '$(MsfsSdkDir)' == '' and '$(MSFS_SDK)' != '' ">$(MSFS_SDK)</MsfsSdkDir>
     <MsfsSdkDir Condition=" '$(MsfsSdkDir)' == '' ">$(MSBuildThisFileDirectory)..\MSFS 2024 SDK</MsfsSdkDir>
   </PropertyGroup>
 
   <PropertyGroup>
-    <SimConnectDll>$(MsfsSdkDir)/SimConnect SDK/lib/SimConnect.dll</SimConnectDll>
+    <SimConnectDll>$(MsfsSdkDir)\SimConnect SDK\lib\SimConnect.dll</SimConnectDll>
     <!-- Fallback to the SimConnect.dll that ships with an installed MSFS 2024 -->
     <SimConnectDll Condition=" !Exists('$(SimConnectDll)') ">
-      $([System.Environment]::GetFolderPath('LocalApplicationData'))/Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/SimConnect SDK/lib/SimConnect.dll
+      $([System.Environment]::GetFolderPath('LocalApplicationData'))\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\SimConnect.dll
     </SimConnectDll>
   </PropertyGroup>
 

@@ -635,6 +635,7 @@ Console commands: `engage`, `disengage`, `toggle`, `plan <path.pln>`, `airport <
 ### 2. Build and publish
 
 ```powershell
+$env:MSFS2024_SDK = 'D:\MSFS 2024 SDK'
 dotnet build -c Release
 dotnet publish MSFS2024AIPilot.Host -c Release -o .\publish
 ```
@@ -735,8 +736,10 @@ cd MSFS2024AIPilot.Panel
 .\build.bat
 ```
 
-`build.bat` locates the SDK (`MSFS_SDK`, then `MSFS 2024 SDK` beside the repo), runs
-`fspackagetool.exe package.xml`, and copies the result into the Community folder.
+`build.bat` locates the SDK (`MSFS2024_SDK`, then `MSFS_SDK`, then `MSFS 2024 SDK`
+beside the repo), runs `fspackagetool.exe package.xml -nopause`, and copies the
+result into the installed packages root from `UserCfg.opt`, preferring
+`Community2024` when that folder exists and falling back to `Community`.
 
 **`fspackagetool.exe` is not a standalone packager.** It launches the packaging pass
 from inside an installed `FlightSimulator2024.exe` and waits for it, so building the
@@ -811,8 +814,10 @@ Requires the **.NET 8 SDK** (install with `winget install Microsoft.DotNet.SDK.8
 
 `SimConnect.dll` is resolved in this order:
 1. `-p:MsfsSdkDir="C:\path\to\MSFS 2024 SDK"` passed to the build
-2. the `MSFS 2024 SDK` folder in this repo
-3. `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\` (a Microsoft Store install)
+2. the `MSFS2024_SDK` environment variable
+3. the `MSFS_SDK` environment variable
+4. the `MSFS 2024 SDK` folder in this repo
+5. `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\` (a Microsoft Store install)
 
 ```powershell
 dotnet build
@@ -991,5 +996,3 @@ at startup, and then a gate checklist stuck re-firing item 5/9 for its whole ret
 | Every approach and fix facility definition was refused field by field | `SimConnect_AddToFacilityDefinition` requires the definition to open with one of the four documented entry points (`AIRPORT`, `WAYPOINT`, `NDB`, `VOR`), every member to nest inside a container, a child to open before its parent closes, and one definition to carry one entry point. The APPROACH header definition declared no entry point at all, so its very first field (`TYPE`) was rejected and every later field of the definition failed with it; the transition, final and missed leg definitions opened `OPEN APPROACH_TRANSITION` / `OPEN FINAL_APPROACH_LEG` / `OPEN MISSED_APPROACH_LEG` *after* `CLOSE APPROACH` - all three are children of `APPROACH`; and the fix definition opened `NDB` and `VOR` as siblings of a closed `WAYPOINT`. After the first rejection the whole definition is refused, so no approach, transition, leg or fix ever arrived - and the requests still "completed" with nothing, which is why the route silently held a hole instead of erroring. The definitions are now pure (`NavDataLoader.FacilityDefinitions`) and their structure is pinned by `NavFacilityDefinitionTests` without a simulator | `NavDataLoader.cs` |
 | A fix could be recorded unknown while two of its three lookups were still in flight | Splitting the fix lookup into one definition per entry point means one fix is asked of three requests. The first `FACILITY_DATA_END` used to mark it unknown on its own, so a waypoint request's "not found" discarded an NDB whose answer was on its way. The failure is now recorded only when every request for that fix has ended, and the concurrency cap counts distinct fixes rather than in-flight requests | `NavDataLoader.cs` |
 | The gate checklist stalled on "FUEL PUMP - ON" | MSFS 2024's fuel pump lives in the modern `[FUEL_SYSTEM]` `Pump.N` block: commanded with `FUELSYSTEM_PUMP_ON`/`OFF` (payload = pump index), verified with `FUELSYSTEM PUMP SWITCH:index`. The binding fired only `ELECT_FUEL_PUMP1_SET`, the legacy `[FUEL]` key, against a switch that never moved, so the checkpoint fired for its whole retry cap (~24 s) and the item still failed. Both homes are now commanded, and a one-shot preset fires with the argument its event wants rather than the switch state - a `FUELSYSTEM_PUMP_OFF` carrying 0 addressed pump 0, which is none of them | `ChecklistTextResolver.cs`, pinned by `ChecklistGateFlowTests` |
-
-
