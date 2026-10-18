@@ -22,9 +22,7 @@
   <PropertyGroup>
     <SimConnectDll>$(MsfsSdkDir)\SimConnect SDK\lib\SimConnect.dll</SimConnectDll>
     <!-- Fallback to the SimConnect.dll that ships with an installed MSFS 2024 -->
-    <SimConnectDll Condition=" !Exists('$(SimConnectDll)') ">
-      $([System.Environment]::GetFolderPath('LocalApplicationData'))\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\SimConnect.dll
-    </SimConnectDll>
+    <SimConnectDll Condition=" !Exists('$(SimConnectDll)') and '$(LOCALAPPDATA)' != '' ">$(LOCALAPPDATA)\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\SimConnect.dll</SimConnectDll>
   </PropertyGroup>
 
   <ItemGroup>
