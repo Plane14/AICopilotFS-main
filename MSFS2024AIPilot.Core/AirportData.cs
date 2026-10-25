@@ -104,6 +104,17 @@ public sealed class RunwayInfo
         public bool SecondaryTakeoff { get; set; }
         public bool SecondaryLanding { get; set; }
 
+        /// <summary>
+        /// Primary runway threshold position (latitude/longitude). Null when the airport
+        /// data does not publish a displaced threshold for this end.
+        /// </summary>
+        public (double lat, double lon)? PrimaryThreshold { get; set; }
+        /// <summary>
+        /// Secondary runway threshold position (latitude/longitude). Null when the airport
+        /// data does not publish a displaced threshold for this end.
+        /// </summary>
+        public (double lat, double lon)? SecondaryThreshold { get; set; }
+
         public string PrimaryName => RunwayName(PrimaryNumber, PrimaryDesignator);
         public string SecondaryName => RunwayName(SecondaryNumber, SecondaryDesignator);
 

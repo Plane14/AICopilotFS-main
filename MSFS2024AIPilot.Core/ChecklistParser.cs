@@ -659,6 +659,9 @@ public static class ChecklistParser
         var desc = source.Elements().FirstOrDefault(e => e.Name.LocalName == "CheckpointDesc");
         var subject = ResolveText(loc, (string?)desc?.Attribute("SubjectTT")) ?? id;
         var expectation = ResolveText(loc, (string?)desc?.Attribute("ExpectationTT")) ?? "";
+        var instrument = (string?)desc?.Attribute("Instrument");
+        var forceValidate = string.Equals((string?)desc?.Attribute("ForceValidate"), "TRUE", StringComparison.OrdinalIgnoreCase);
+        var waitForUser = string.Equals((string?)desc?.Attribute("WaitForUserToDoIt"), "TRUE", StringComparison.OrdinalIgnoreCase);
         var clue = source.Elements().FirstOrDefault(e => e.Name.LocalName == "Clue") is { } c
             ? ResolveText(loc, (string?)c.Attribute("Name"))
             : null;
@@ -669,6 +672,9 @@ public static class ChecklistParser
             Subject = subject,
             Expectation = expectation,
             Clue = clue,
+            Instrument = instrument,
+            ForceValidate = forceValidate,
+            WaitForUserToDoIt = waitForUser,
             SourceList = referenceId != null ? $"ref:{referenceId}" : "inline",
         };
 
@@ -734,6 +740,8 @@ public static class ChecklistParser
             FlowEvent = (string?)a.Attribute("FlowEvent"),
             Once = string.Equals((string?)a.Attribute("Once"), "TRUE", StringComparison.OrdinalIgnoreCase),
             Copilot = string.Equals((string?)a.Attribute("Copilot"), "TRUE", StringComparison.OrdinalIgnoreCase),
+            Instrument = (string?)a.Attribute("Instrument"),
+            CheckpointId = (string?)a.Attribute("CheckpointId"),
         };
         if (double.TryParse((string?)a.Attribute("EventParam"), System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var p))
@@ -794,6 +802,18 @@ public static class ChecklistParser
             node.Name = simVar;
             node.Units = (string?)val.Attribute("Units") ?? "bool";
         }
+        // StoreVar and ReadVar let a test read or write a simulator variable by name,
+        // rather than comparing a SimVar. The value comes from the variable the name
+        // resolves to, so the test can gate on a derived state the aircraft exposes.
+        var storeVar = (string?)val.Attribute("StoreVar");
+        if (storeVar != null) node.StoreVar = storeVar;
+        var readVar = (string?)val.Attribute("ReadVar");
+        if (readVar != null) node.ReadVar = readVar;
+        // AircraftVar marks a name that resolves against the aircraft's own LVARs rather
+        // than the standard SimConnect table.
+        if (string.Equals((string?)val.Attribute("IsAircraftVar"), "TRUE", StringComparison.OrdinalIgnoreCase))
+            node.IsAircraftVar = true;
+
         return node;
     }
 

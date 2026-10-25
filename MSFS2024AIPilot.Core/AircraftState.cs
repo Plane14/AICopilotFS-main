@@ -83,7 +83,7 @@ public sealed class AircraftState
     public double[] EngineN2 { get; set; } = [];
     public double[] EngineFF { get; set; } = []; // Fuel flow PPH
     public double[] EngineThrottle { get; set; } = [];
-    /// <summary>Exhaust gas temperature per engine, Celsius (GENERAL ENG EXHAUST GAS TEMPERATURE).</summary>
+    /// <summary>Exhaust gas temperature per engine, Celsius. MSFS 2024 reports this in Rankine; converted at decode.</summary>
     public double[] EngineEgtC { get; set; } = [];
     /// <summary>
     /// Where each engine is against its maximum RPM as a percentage
@@ -104,7 +104,7 @@ public sealed class AircraftState
 
     /// <summary>True when the aircraft is in cloud (AMBIENT IN CLOUD) - visible moisture.</summary>
     public bool AmbientInCloud { get; set; }
-    /// <summary>Precipitation state (AMBIENT PRECIP STATE): 0 none, 1 rain, 2 snow, ...</summary>
+    /// <summary>Precipitation state (AMBIENT PRECIP STATE): bitmask - 2=None, 4=Rain, 8=Snow.</summary>
     public double PrecipitationState { get; set; }
     /// <summary>Structural ice on the airframe, 0..100 (STRUCTURAL ICE PCT).</summary>
     public double StructuralIcePercent { get; set; }

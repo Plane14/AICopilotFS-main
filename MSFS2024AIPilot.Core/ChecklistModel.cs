@@ -82,6 +82,11 @@ public sealed class SimVarNode
     public double? Constant;
     public string? Name;
     public string Units = "bool";
+    /// <summary>StoreVar/ReadVar: when set, the test reads or writes a simulator variable.</summary>
+    public string? StoreVar;
+    public string? ReadVar;
+    /// <summary>AircraftVar: a custom SimVar defined by the aircraft (e.g. AIRCRAFT PANEL ALERT).</summary>
+    public bool IsAircraftVar;
 
     public bool IsConstant => Constant.HasValue;
     public double Value => Constant ?? 0;
@@ -129,6 +134,10 @@ public sealed class ChecklistAction
     public SpecialActionType Special = SpecialActionType.None;
     public double? Value;
     public string? FlowEvent;
+    /// <summary>The instrument this action targets, from the Instrument attribute on CheckpointDesc.</summary>
+    public string? Instrument;
+    /// <summary>The CheckpointId this action references, for flow control.</summary>
+    public string? CheckpointId;
 
     public bool IsExecutable => EventId != null || Special is not SpecialActionType.None;
 }
@@ -146,10 +155,16 @@ public sealed class ChecklistItem
     public double DurationSeconds;
     public bool Once;
     public bool Facultative;
+    /// <summary>From CheckpointDesc: the instrument this checkpoint verifies.</summary>
+    public string? Instrument;
+    /// <summary>From CheckpointDesc: when True, accept any test result the copilot produces without waiting.</summary>
+    public bool ForceValidate { get; set; }
+    /// <summary>From CheckpointDesc: when True, the executor waits for the user to complete the item manually.</summary>
+    public bool WaitForUserToDoIt { get; set; }
     /// Set for legacy text items: the resolver output, re-resolved at execution
     /// time so "AS REQUIRED" uses live weather and assigned squawks.</summary>
     public object? TextBinding;
-    /// Evaluated once when the item starts; a false guard skips the item silently
+    /// Evaluated once when the item starts: a false guard skips the item silently
     /// (used for 2024-format BlockCondition).</summary>
     public ConditionNode? StartGuard;
     public string SourceList = "";
@@ -166,6 +181,8 @@ public sealed class ChecklistItem
     {
         foreach (var o in node.Operands)
             if (o.Name != null) yield return o.Name;
+            else if (o.StoreVar != null) yield return o.StoreVar;
+            else if (o.ReadVar != null) yield return o.ReadVar;
         foreach (var c in node.Children)
             foreach (var n in Collect(c)) yield return n;
     }

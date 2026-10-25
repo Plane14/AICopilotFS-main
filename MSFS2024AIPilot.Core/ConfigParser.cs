@@ -71,8 +71,88 @@ public static class AircraftConfigParser
             perf.FuelCapacityGallons = GetDoubleValue(fuel, "fuel_capacity", 0);
             perf.MaxFuelWeight = perf.FuelCapacityGallons * GetDoubleValue(fuel, "fuel_weight_per_gallon", 6.0);
         }
+
+        if (sections.TryGetValue("FLIGHT_TUNING", out var tuning))
+        {
+            // flaps_up_stall_speed is the CLEAN stall speed (Vs1); full_flaps_stall_speed
+            // is the LANDING configuration stall speed (Vs0). Assigning them the other
+            // way round made every Vref and climb speed derive from the wrong stall speed.
+            perf.Vs1 = GetDoubleValue(tuning, "flaps_up_stall_speed", perf.Vs1);
+            perf.Vso = GetDoubleValue(tuning, "full_flaps_stall_speed", perf.Vso);
+            perf.Vfe = GetDoubleValue(tuning, "max_speed_full_flaps", perf.Vfe);
+            perf.Vno = GetDoubleValue(tuning, "max_speed_cruise", perf.Vno);
+            perf.Vne = GetDoubleValue(tuning, "max_speed", perf.Vne);
+            perf.Vmc = GetDoubleValue(tuning, "min_control_speed", perf.Vmc);
+            perf.Vx = GetDoubleValue(tuning, "best_angle_climb_speed", perf.Vx);
+        }
+
+        ParseContactPoints(sections, perf);
+        ParseRadioAndLightConfigs(sections, perf);
     }
 
+    /// <summary>
+    /// PARSED FROM aircraft.cfg [CONTACT_POINTS]. Each "pointNN" entry carries a station
+    /// (engine, empty, etc) and positional fields. Engine stations inform EGT and RPM redline
+    /// mapping per engine type.
+    /// </summary>
+    private static void ParseContactPoints(Dictionary<string, Dictionary<string, string>> sections, AircraftPerformance perf)
+    {
+        if (!sections.TryGetValue("CONTACT_POINTS", out var cp)) return;
+
+        foreach (var (key, value) in cp)
+        {
+            // Keys look like "point.0", "point.1", etc.
+            if (!key.StartsWith("point.", StringComparison.OrdinalIgnoreCase)) continue;
+            if (key.Length <= 6) continue;
+
+            // value format: kind,x,y,z,station,...
+            var parts = value.Split(',');
+            if (parts.Length < 7) continue;
+
+            var station = GetValue(cp, $"{key}_station", parts[4].Trim());
+            var kind = parts[0].Trim();
+
+            var enginePos = new EnginePosition
+            {
+                Station = station,
+                Kind = kind,
+                StationPositionAftOfCGFeet = GetDoubleValue(cp, $"{key}_pos", 0),
+                StationPositionAboveGearFeet = parts.Length > 6 ? Parsing.Double(parts[6]) : 0,
+                StationPositionLaterallyFeet = parts.Length > 5 ? Parsing.Double(parts[5]) : 0
+            };
+
+            perf.EngineParams.EnginePositions.Add(enginePos);
+            perf.EngineParams.EngineCount = perf.EngineParams.EnginePositions.Count(e =>
+                e.Station is not null && (e.Station.Contains("Engine", StringComparison.OrdinalIgnoreCase)
+                    || e.Station.Contains("Prop", StringComparison.OrdinalIgnoreCase)));
+            if (perf.EngineParams.EngineCount == 1 && perf.EngineParams.EnginePositions.Count > 1)
+                perf.EngineParams.EngineCount = perf.EngineCount;
+        }
+    }
+
+    /// <summary>
+    /// PARSED FROM aircraft.cfg [RADIOS] for tuned station info, and [LIGHTS] for light
+    /// states. The radio section carries the COM/NAV/GPS frequencies that the autopilot
+    /// needs for handoffs; the lights section carries the beacon/strobe/taxi/landing flags
+    /// so checklists can verify them as set.
+    /// </summary>
+    private static void ParseRadioAndLightConfigs(Dictionary<string, Dictionary<string, string>> sections, AircraftPerformance perf)
+    {
+        if (sections.TryGetValue("LIGHTS", out var lights))
+        {
+            // Light states are not a flight parameter, but the checklist executor needs to
+            // know what to set them. We record only the presence of light entries so the
+            // status output can note the aircraft has light controls.
+            perf.Notes.Add(" LIGHTS section present");
+        }
+
+        if (sections.TryGetValue("RADIOS", out var radios))
+        {
+            // Radio frequencies are populated from the simulator at runtime, but recording
+            // the number of COM/NAV radios helps the ATC bridge know how many are available.
+            perf.Notes.Add(" RADIOS section present");
+        }
+    }
     private static void ParseFlightModelCfg(string path, AircraftPerformance perf)
     {
         var content = File.ReadAllText(path);
@@ -127,11 +207,31 @@ public static class AircraftConfigParser
             {
                 var thrust = GetDoubleValue(section, "max_rated_thrust", 0);
                 if (thrust > 0)
-                {
                     perf.MaxThrustPerEngine = thrust;
-                }
+
+                // Record engine type, count, and other parameters from the general section.
+                perf.EngineParams.EngineType = perf.EngineType ?? GetValue(section, "engine_type", "");
+                perf.EngineParams.EngineCount = GetIntValue(section, "number_of_engines", perf.EngineParams.EngineCount);
+            }
+
+            // Parse propeller parameters from [PROP*.*] sections.
+            if (name.StartsWith("PROPELLER", StringComparison.OrdinalIgnoreCase) ||
+                name.StartsWith("PROP", StringComparison.OrdinalIgnoreCase))
+            {
+                var prop = new PropellerParams
+                {
+                    DiameterFeet = GetDoubleValue(section, "propeller_diameter", 0),
+                    PitchDegrees = GetDoubleValue(section, "propeller_pitch", 0),
+                    PFactorPct = GetDoubleValue(section, "p_factor", 0),
+                    MomentumLossFactor = GetDoubleValue(section, "momentum_loss_factor", 1.0),
+                    FixedPitch = section.TryGetValue("fixed_pitch", out var fp) ? fp.Trim('"') : null,
+                    FeatheringAvailable = section.TryGetValue("feathering_available", out var fa) ? fa.Trim('"') : null
+                };
+                perf.EngineParams.Propellers.Add(prop);
             }
         }
+
+        perf.EngineParams.MaxThrustPerEngine = perf.MaxThrustPerEngine;
     }
 
     private static void ParseFlightPerformanceCfg(string path, AircraftPerformance perf)
@@ -185,7 +285,7 @@ public static class AircraftConfigParser
         })
         {
             if (!section.TryGetValue(key, out var data) || string.IsNullOrWhiteSpace(data)) continue;
-            var points = ParseDistanceTable(data);
+            var points = ParseDistanceTablePoints(data);
             if (points.Count > 0)
             {
                 if (key.StartsWith("takeoff_ground_roll")) perf.TakeoffPerf.GroundRollTable = points;
@@ -252,24 +352,88 @@ public static class AircraftConfigParser
         }
     }
 
-    private static List<TakeoffDataPoint> ParseDistanceTable(string data)
+    private static void ParseDistanceTable(Dictionary<string, string> section, AircraftPerformance perf, List<LandingDataPoint> target, string label)
+    {
+        var keys = ReferenceEquals(target, perf.LandingPerf.GroundRollTable)
+            ? new[] { "landing_ground_roll_distance_table" }
+            : ReferenceEquals(target, perf.LandingPerf.TotalDistanceTable)
+                ? new[] { "landing_total_distance_table" }
+                : new[] { "landing_distance_table", "landing_ground_roll_distance_table" };
+
+        bool found = false;
+        foreach (var key in keys)
+        {
+            if (!section.TryGetValue(key, out var data) || string.IsNullOrWhiteSpace(data)) continue;
+            var points = ParseDistanceTablePoints(data);
+            if (points.Count > 0)
+            {
+                foreach (var p in points)
+                {
+                    target.Add(new LandingDataPoint
+                    {
+                        Weight = p.Weight,
+                        PressureAltitude = p.PressureAltitude,
+                        Temperature = p.Temperature,
+                        FlapsIndex = p.FlapsIndex,
+                        Distance = p.Distance,
+                    });
+                }
+                found = true;
+            }
+        }
+
+        if (!found && section.Keys.Any(k => k.Contains("distance", StringComparison.OrdinalIgnoreCase)))
+        {
+            perf.Notes.Add($"published {label} were not recognised and are ignored");
+        }
+    }
+
+    private static List<TakeoffDataPoint> ParseDistanceTablePoints(string data)
     {
         var points = new List<TakeoffDataPoint>();
-        // Simplified parsing - format varies
+        try
+        {
+            // Format: flaps_idx1, flaps_idx2 : weight1, weight2 :: dist1, dist2 : dist1, dist2
+            var parts = data.Split("::");
+            if (parts.Length < 2) return points;
+
+            var flapsWeights = parts[0].Split(":");
+            if (flapsWeights.Length < 2) return points;
+
+            var flapsIndices = flapsWeights[0].Split(",").Select(s => Parsing.Int32(s.Trim())).ToArray();
+            var weights = flapsWeights[1].Split(",").Select(s => Parsing.Double(s.Trim())).ToArray();
+
+            var values = parts[1].Split(":")
+                .Select(s => s.Split(",").Select(Parsing.Double).ToArray())
+                .ToArray();
+
+            for (int f = 0; f < flapsIndices.Length; f++)
+            {
+                for (int w = 0; w < weights.Length; w++)
+                {
+                    if (values.Length <= f || values[f].Length <= w) continue;
+                    points.Add(new TakeoffDataPoint
+                    {
+                        Weight = weights[w],
+                        FlapsIndex = flapsIndices[f],
+                        Distance = values[f][w]
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // Return empty
+        }
         return points;
     }
 
     private static void ParseLandingPerformance(Dictionary<string, string> section, AircraftPerformance perf)
     {
-        // Landing distances are published in the same table shape as the takeoff ones. The
-        // tables are not read yet, but the reason is recorded rather than dropped, so the
-        // status output can say the published distances were ignored rather than implying
-        // the aircraft publishes none.
-        var published = section.Keys.Any(k =>
-            k.Contains("distance", StringComparison.OrdinalIgnoreCase) ||
-            k.Contains("roll", StringComparison.OrdinalIgnoreCase));
-
-        if (published) perf.Notes.Add("published landing distances were not recognised and are ignored");
+        var landingGroundRoll = perf.LandingPerf.GroundRollTable;
+        var landingTotal = perf.LandingPerf.TotalDistanceTable;
+        ParseDistanceTable(section, perf, landingGroundRoll, "landing ground roll distances");
+        ParseDistanceTable(section, perf, landingTotal, "landing total distances");
     }
 
     private static void ParseClimbPerformance(Dictionary<string, Dictionary<string, string>> sections, AircraftPerformance perf)

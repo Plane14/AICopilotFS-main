@@ -164,7 +164,8 @@ public class AircraftDataLayoutTests
             var baseIndex = 1 + e * 2;
             Assert.Equal($"GENERAL ENG EXHAUST GAS TEMPERATURE:{engine}", limits[baseIndex].Name);
             Assert.Equal($"GENERAL ENG PCT MAX RPM:{engine}", limits[baseIndex + 1].Name);
-            Assert.Equal("celsius", limits[baseIndex].Units);
+            // MSFS 2024 reports EGT in Rankine; converted to Celsius at the decode boundary.
+            Assert.Equal("rankine", limits[baseIndex].Units);
             Assert.Equal("percent", limits[baseIndex + 1].Units);
         }
 

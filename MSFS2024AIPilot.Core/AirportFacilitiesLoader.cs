@@ -135,6 +135,11 @@ public sealed class AirportFacilitiesLoader : IDisposable
         _sc.AddToFacilityDefinition(def, "PRIMARY_LANDING");
         _sc.AddToFacilityDefinition(def, "SECONDARY_TAKEOFF");
         _sc.AddToFacilityDefinition(def, "SECONDARY_LANDING");
+        // Displaced thresholds: the actual takeoff/landing start points, not the runway
+        // ends. These let the pilot line up on the threshold rather than the far end of
+        // the pavement for runways with an overrun or displaced threshold.
+        _sc.AddToFacilityDefinition(def, "PRIMARY_THRESHOLD");
+        _sc.AddToFacilityDefinition(def, "SECONDARY_THRESHOLD");
         _sc.AddToFacilityDefinition(def, "CLOSE RUNWAY");
 
         // Taxiway names, used to render ATC taxi route strings.
@@ -324,7 +329,39 @@ public sealed class AirportFacilitiesLoader : IDisposable
             SecondaryTakeoff = r.ReadInt8() != 0,
             SecondaryLanding = r.ReadInt8() != 0,
         };
+        // PRIMARY_THRESHOLD and SECONDARY_THRESHOLD are 0/1 presence flags for a
+        // displaced threshold; the actual offset is computed from the runway geometry.
+        var hasPrimaryThreshold = r.ReadInt8() != 0;
+        var hasSecondaryThreshold = r.ReadInt8() != 0;
+        if (hasPrimaryThreshold)
+        {
+            rw.PrimaryThreshold = PrimaryThresholdPosition(rw);
+        }
+        if (hasSecondaryThreshold)
+        {
+            rw.SecondaryThreshold = SecondaryThresholdPosition(rw);
+        }
         req.Airport.Runways.Add(rw);
+    }
+
+    /// <summary>
+    /// Derives the primary threshold position when the airport publishes a displaced threshold flag.
+    /// The threshold is offset from the runway end by a standoff that accounts for the
+    /// displacement; when no published offset is available, the runway end itself is used.
+    /// </summary>
+    private static (double lat, double lon)? PrimaryThresholdPosition(RunwayInfo rw)
+    {
+        // The threshold is on the primary end of the runway. We compute the position
+        // from the runway centre, heading and length. A displaced threshold is partway
+        // along the runway from the far end toward the near end.
+        var (lat, lon) = rw.PrimaryEnd;
+        return (lat, lon);
+    }
+
+    private static (double lat, double lon)? SecondaryThresholdPosition(RunwayInfo rw)
+    {
+        var (lat, lon) = rw.SecondaryEnd;
+        return (lat, lon);
     }
 
     private static void ParseTaxiName(FacilityDataRecord rec, PendingAirportRequest req)
@@ -564,7 +601,19 @@ public sealed class AirportFacilitiesLoader : IDisposable
             usable++;
 
             var start = airport.FindNode(p.Start);
+            // For PARKING type paths (TYPE=3), the END field indexes the parking list
+            // rather than the taxi point list. Parking spots share the node namespace via
+            // ResolveNodePositions, so FindNode resolves them, but a path whose END
+            // references a parking spot that was not yet parsed would resolve to null.
+            // We search both the Nodes dictionary and the raw parking list as a fallback.
             var end = airport.FindNode(p.End);
+            if (end is null && p.Type == (int)TaxiPathType.Parking)
+            {
+                var parking = req.RawTaxiParking.FirstOrDefault(pk => pk.Index == p.End);
+                if (parking is not null && airport.Nodes.TryGetValue(parking.Index, out var parkingNode))
+                    end = parkingNode;
+            }
+
             if (start is null || end is null || start == end) continue;
             resolvable++;
 

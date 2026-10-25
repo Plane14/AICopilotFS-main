@@ -136,12 +136,18 @@ public static class WeatherModel
     /// Whether conditions are conducive to airframe icing: moisture in cloud or falling, at a
     /// temperature in the icing band, or ice already collecting on the structure. This is what
     /// the checklist's "as required" ice-protection items are settled by.
+    /// <para>
+    /// AMBIENT PRECIP STATE is a bitmask: 2=None, 4=Rain, 8=Snow, and combinations thereof.
+    /// A value of 2 (None) must not count as moisture, so the check tests for the Rain and
+    /// Snow bits rather than any nonzero value.
+    /// </para>
     /// </summary>
     public static bool IcingConditions(double oatC, bool inCloud, double precipState, double structuralIcePercent)
     {
         if (structuralIcePercent >= IcePerceptionThreshold) return true;
         if (oatC > IcingUpperTempC || oatC < IcingLowerTempC) return false;
-        return inCloud || precipState > 0.5;
+        // The Rain bit (4) and the Snow bit (8): together 12 covers both precipitation types.
+        return inCloud || (precipState > 0.5 && ((int)precipState & 12) != 0);
     }
 
     /// <summary>
