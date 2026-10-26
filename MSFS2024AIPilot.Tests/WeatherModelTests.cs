@@ -152,7 +152,11 @@ public class WeatherModelTests
     {
         Assert.False(WeatherModel.IcingConditions(0, inCloud: false, precipState: 0, structuralIcePercent: 0));
         Assert.True(WeatherModel.IcingConditions(0, inCloud: true, precipState: 0, structuralIcePercent: 0));
-        Assert.True(WeatherModel.IcingConditions(0, inCloud: false, precipState: 1, structuralIcePercent: 0));
+        // AMBIENT PRECIP STATE is a bitmask: 2=None, 4=Rain, 8=Snow.
+        // None (2) must not count as moisture; rain (4) and snow (8) must.
+        Assert.True(WeatherModel.IcingConditions(0, inCloud: false, precipState: 4, structuralIcePercent: 0));
+        Assert.True(WeatherModel.IcingConditions(0, inCloud: false, precipState: 8, structuralIcePercent: 0));
+        Assert.False(WeatherModel.IcingConditions(0, inCloud: false, precipState: 2, structuralIcePercent: 0));
     }
 
     [Fact]

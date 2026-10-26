@@ -121,6 +121,13 @@ public static class FlightEnvelope
     public const double JetEgtRedlineC = 950;
     public const double TurbopropEgtRedlineC = 850;
 
+    /// <summary>
+    /// Converts an EGT reading from Rankine (the unit MSFS 2024 reports) to Celsius,
+    /// which is what the pilot's limits and the aircraft.cfg redlines are expressed in.
+    /// </summary>
+    public static double RankineToCelsius(double rankine)
+        => (rankine - 491.67) * 5.0 / 9.0;
+
     /// <summary>An engine at this percentage of its maximum RPM is on the redline.</summary>
     public const double EngineRpmRedlinePercent = 100.0;
 
@@ -163,9 +170,11 @@ public static class FlightEnvelope
     /// Redline exhaust gas temperature for an engine type, in Celsius.
     /// <para>
     /// Zero means "no EGT limit", which is what a piston engine gets: exhaust gas temperature
-    /// is a cylinder-by-cylinder measurement on a recip with no single redline, and the
+    /// is a per-cylinder measurement on a recip with no single redline, and the
     /// near-ambient value the variable reports for one is not one. The types the aircraft
-    /// configs publish are PISTON, TURBOPROP and JET.
+    /// configs publish are PISTON, TURBOPROP and JET. The EGT SimVar is reported in Rankine
+    /// by MSFS 2024 and converted to Celsius at the decode boundary in
+    /// <see cref="AircraftController"/>.
     /// </para>
     /// </summary>
     public static double EgtRedlineC(string? engineType)

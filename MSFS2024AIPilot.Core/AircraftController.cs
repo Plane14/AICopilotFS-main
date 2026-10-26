@@ -202,7 +202,7 @@ public sealed class AircraftController
         layout.Add(("ENGINE_LIMITS", "NUMBER OF ENGINES", "number"));
         for (uint engine = 1; engine <= MaxEngines; engine++)
         {
-            layout.Add(("ENGINE_LIMITS", $"GENERAL ENG EXHAUST GAS TEMPERATURE:{engine}", "celsius"));
+            layout.Add(("ENGINE_LIMITS", $"GENERAL ENG EXHAUST GAS TEMPERATURE:{engine}", "rankine"));
             layout.Add(("ENGINE_LIMITS", $"GENERAL ENG PCT MAX RPM:{engine}", "percent"));
         }
 
@@ -268,6 +268,8 @@ public sealed class AircraftController
             ("SYSTEMS", "STALL WARNING", "bool"),
             ("SYSTEMS", "OVERSPEED WARNING", "bool"),
             ("SYSTEMS", "AIRSPEED BARBER POLE", "knots"),
+            ("SYSTEMS", "MACH MAX OPERATE", "number"),
+            ("SYSTEMS", "BARBER POLE MACH", "number"),
 
             ("APMODES", "AUTOPILOT FLIGHT DIRECTOR ACTIVE", "bool"),
             ("APMODES", "AUTOPILOT VERTICAL HOLD", "bool"),
@@ -438,6 +440,13 @@ public sealed class AircraftController
     /// thread from <see cref="Dispatch"/>, so it is the only writer; readers go through
     /// <see cref="GetSnapshot"/>.
     /// </summary>
+    /// <summary>
+    /// MSFS 2024 documents GENERAL ENG EXHAUST GAS TEMPERATURE as returning Rankine.
+    /// The pilot works entirely in Celsius, so the decode boundary converts it here.
+    /// </summary>
+    private static double RankineToCelsius(double rankine)
+        => (rankine - 491.67) * 5.0 / 9.0;
+
     private void OnDataReceived(SimObjectData data)
     {
         if (!_requestMap.TryGetValue(data.RequestId, out var blockName)) return;
@@ -521,7 +530,8 @@ public sealed class AircraftController
                         for (int e = 0; e < count && e < MaxEngines; e++)
                         {
                             int baseIndex = 1 + e * 2;
-                            egt[e] = D(baseIndex);
+                            // MSFS 2024 returns EGT in Rankine; the pilot works in Celsius.
+                            egt[e] = RankineToCelsius(D(baseIndex));
                             maxRpm[e] = D(baseIndex + 1);
                         }
 

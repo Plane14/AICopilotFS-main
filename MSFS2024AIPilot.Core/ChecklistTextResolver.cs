@@ -133,7 +133,28 @@ public static class ChecklistTextResolver
         };
 
         Reg("FUEL PUMP", pump);
-        RegAliases(new[] { "FUEL BOOST PUMP", "BOOST PUMP", "AUX FUEL PUMP", "FUEL BOOSTER PUMP", "L FUEL PUMP", "FUEL PUMP 1" }, pump);
+        RegAliases(new[] { "FUEL BOOST PUMP", "BOOST PUMP", "AUX FUEL PUMP", "FUEL BOOSTER PUMP", "L FUEL PUMP", "FUEL PUMP 1", "BOOST PUMP 1" }, pump);
+
+        // Multi-engine fuel pumps: the indexed events FUELSYSTEM_PUMP_ON/OFF take a pump
+        // index as parameter, so a "FUEL PUMP 2 - ON" item commands pump 2 specifically.
+        // ResolvePumper extracts the pump number and binds to the indexed event family.
+        var pump2 = new SwitchBinding("FUELSYSTEM PUMP SWITCH:2")
+        {
+            PayloadEvents = { "FUELSYSTEM_PUMP_ON", "FUELSYSTEM_PUMP_OFF", "ELECT_FUEL_PUMP2_SET" }
+        };
+        RegAliases(new[] { "FUEL PUMP 2", "R FUEL PUMP", "BOOST PUMP 2" }, pump2);
+
+        var pump3 = new SwitchBinding("FUELSYSTEM PUMP SWITCH:3")
+        {
+            PayloadEvents = { "FUELSYSTEM_PUMP_ON", "FUELSYSTEM_PUMP_OFF", "ELECT_FUEL_PUMP3_SET" }
+        };
+        RegAliases(new[] { "FUEL PUMP 3", "BOOST PUMP 3" }, pump3);
+
+        var pump4 = new SwitchBinding("FUELSYSTEM PUMP SWITCH:4")
+        {
+            PayloadEvents = { "FUELSYSTEM_PUMP_ON", "FUELSYSTEM_PUMP_OFF", "ELECT_FUEL_PUMP4_SET" }
+        };
+        RegAliases(new[] { "FUEL PUMP 4", "BOOST PUMP 4" }, pump4);
 
         // The beacon state is the SimVar LIGHT BEACON. A truncated name such as
         // "LIGHT BEAC" is rejected by the sim with NAME_UNRECOGNIZED, so its feed
@@ -175,6 +196,29 @@ public static class ChecklistTextResolver
         });
         RegAliases(new[] { "ENGINE ANTI ICE", "ENG ANTI ICE", "ICE PROTECTION", "PROP HEAT", "PROP DEICE", "ANTI ICE SWITCH" }, Bindings["ANTI ICE"]);
         Reg("WINDSHIELD DEICE", new SwitchBinding(null) { OnEvents = { "WINDSHIELD_DEICE_ON" }, OffEvents = { "WINDSHIELD_DEICE_OFF" }, AsRequired = AsRequiredMode.IceProtection });
+
+        // Prop deice: cycled, not held. BIND aircraft prop deice to PROP_DEICE_TOGGLE.
+        Reg("PROP DEICE", new SwitchBinding("PROPELLER DEICE SWITCH") { OnEvents = { "PROP_DEICE_TOGGLE" } });
+        RegAliases(new[] { "PROP DEICER", "PROPELLER DEICE", "PROPELLER DEICER" }, Bindings["PROP DEICE"]);
+
+        // Wiper controls use WIPER_SET with a position payload (0=off, 100=full slow, 200=full fast).
+        var wipers = new SwitchBinding("WIPER SWITCH POSITION") { VerifyUnits = "number", PayloadEvents = { "SET_WIPERS" } };
+        Reg("WIPER", wipers);
+        RegAliases(new[] { "WIPERS", "WINDSHIELD WIPERS", "WINDSCREEN WIPERS" }, wipers);
+
+        // Hydraulic systems: pump switches per system. Generic binding uses the main pump.
+        var hydraulic = new SwitchBinding("HYDRAULIC PRESSURE:1") { PayloadEvents = { "HYDRAULIC_PUMP_SET" } };
+        Reg("HYDRAULIC", hydraulic);
+        RegAliases(new[] { "HYDRAULICS", "HYDRAULIC PUMP" }, hydraulic);
+
+        // Electrical bus / generator controls.
+        Reg("GENERATOR BUS", new SwitchBinding("ELECTRICAL GEN SWITCH") { OnEvents = { "GEN1_ON" }, OffEvents = { "GEN1_OFF" } });
+        Reg("ELECTRICAL BUS", new SwitchBinding("ELECTRICAL BUS TIE") { PayloadEvents = { "ELECTRICAL_BUS_TIE_SET" } });
+
+        // Bleed air for turbine aircraft.
+        var bleed = new SwitchBinding("BLEED AIR VALVE") { OnEvents = { "AIR VALVE OPEN" }, OffEvents = { "AIR VALVE CLOSED" }, AsRequired = AsRequiredMode.IceProtection };
+        Reg("BLEED", bleed);
+        RegAliases(new[] { "BLEED AIR", "AIR VALVE", "ENGINE BLEED" }, bleed);
         RegAliases(new[] { "WINDSHIELD ANTI ICE", "WINDOW HEAT", "WINDSHIELD DEICE" }, Bindings["WINDSHIELD DEICE"]);
 
         Reg("STARTER", new SwitchBinding("GENERAL ENG STARTER:1") { PayloadEvents = { "STARTER1_SET" } });
@@ -225,6 +269,17 @@ public static class ChecklistTextResolver
         RegAliases(new[] { "PARK BREKE", "PARKING BRAKES", "PARK BRAKE" }, brake);
 
         Reg("YAW DAMPER", new SwitchBinding("AUTOPILOT YAW DAMPER") { OnEvents = { "YAW_DAMPER_ON" }, OffEvents = { "YAW_DAMPER_OFF" } });
+
+        // Autopilot / flight director bindings: these verify against the APMODES
+        // SimVars so a checklist step can confirm the mode is active before proceeding.
+        Reg("FLIGHT DIRECTOR", new SwitchBinding("AUTOPILOT FLIGHT DIRECTOR ACTIVE")
+        { OnEvents = { "TOGGLE_FLIGHT_DIRECTOR" } });
+        Reg("AUTOPILOT", new SwitchBinding("AUTOPILOT MASTER") { OnEvents = { "AUTOPILOT_ON" }, OffEvents = { "AUTOPILOT_OFF" } });
+        Reg("AUTO THROTTLE", new SwitchBinding("AUTO THROTTLE AVAILABLE") { OnEvents = { "AUTO_THROTTLE_ON" }, OffEvents = { "AUTO_THROTTLE_OFF" } });
+        Reg("AUTOPILOT CAPTURE", new SwitchBinding("AUTOPILOT ALTITUDE LOCK") { OnEvents = { "AP_ALT_HOLD" } });
+        Reg("NAV", new SwitchBinding("AUTOPILOT NAV1 HOLD") { OnEvents = { "AP_NAV1_HOLD" } });
+        Reg("HEADING", new SwitchBinding("AUTOPILOT HEADING LOCK") { OnEvents = { "AP_PANEL_HEADING_HOLD" } });
+        Reg("APPROACH", new SwitchBinding("AUTOPILOT APPROACH HOLD") { OnEvents = { "AP_APR_HOLD" } });
 
         var autobrake = new SwitchBinding(null);
         autobrake.QualifierEvents["RTO"] = "AUTOBRAKE_LO_SET";

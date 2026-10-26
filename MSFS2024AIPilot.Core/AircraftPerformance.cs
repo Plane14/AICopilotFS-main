@@ -3,6 +3,42 @@ using System.Collections.Generic;
 
 namespace MSFS2024AIPilot.Core;
 
+/// <summary>Engine parameters parsed from engines.cfg.</summary>
+public sealed class EngineParameters
+{
+    /// <summary>Maximum rated thrust per engine (lbs), from max_rated_thrust.</summary>
+    public double MaxThrustPerEngine { get; set; }
+    /// <summary>Engine type from aircraft.cfg: jet, turboprop, piston, etc.</summary>
+    public string EngineType { get; set; } = "";
+    /// <summary>Number of engines.</summary>
+    public int EngineCount { get; set; } = 1;
+    /// <summary>Engine positions (station, kind, number), from CONTACT_POINTS in aircraft.cfg.</summary>
+    public List<EnginePosition> EnginePositions { get; set; } = new();
+    /// <summary>Propeller parameters, from engines.cfg [PROP*].</summary>
+    public List<PropellerParams> Propellers { get; set; } = new();
+}
+
+/// <summary>One engine position from the CONTACT_POINTS section.</summary>
+public sealed class EnginePosition
+{
+    public string? Station { get; set; }
+    public string? Kind { get; set; }
+    public double StationPositionAftOfCGFeet { get; set; }
+    public double StationPositionAboveGearFeet { get; set; }
+    public double StationPositionLaterallyFeet { get; set; }
+}
+
+/// <summary>Propeller parameters from engines.cfg.</summary>
+public sealed class PropellerParams
+{
+    public double DiameterFeet { get; set; }
+    public double PitchDegrees { get; set; }
+    public double PFactorPct { get; set; }
+    public double MomentumLossFactor { get; set; }
+    public string? FixedPitch { get; set; }
+    public string? FeatheringAvailable { get; set; }
+}
+
 public sealed class AircraftPerformance
 {
     /// <summary>
@@ -46,8 +82,11 @@ public sealed class AircraftPerformance
     public double Vx { get; set; } // Best angle of climb (KIAS)
     public double Vy { get; set; } // Best rate of climb (KIAS)
     public double Vref { get; set; } // Reference landing speed (KIAS)
-    public double Vapp { get; set; } // Approach speed (KIAS)
-    public double Vmca { get; set; } // Min control air (KIAS)
+    public double Vapp { get; set; } // Approach Speed (KIAS) = Vref + 5-10 knots
+    public double Vmca { get; set; } // Min control airspeed (KIAS)
+
+    /// <summary>Engine parameters parsed from engines.cfg.</summary>
+    public EngineParameters EngineParams { get; set; } = new();
 
     public Dictionary<int, VSpeedTable> TakeoffVSpeeds { get; set; } = new(); // Key = flaps index
     public Dictionary<int, VSpeedTable> LandingVSpeeds { get; set; } = new();
