@@ -1,0 +1,134 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Host/MSFS2024AIPilot.Host.csproj": {}
+  },
+  "projects": {
+    "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj",
+        "projectName": "MSFS2024AIPilot.Core",
+        "projectPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj",
+        "packagesPath": "/home/runner/.nuget/packages/",
+        "outputPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/runner/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0-windows"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0-windows": {
+            "framework": "net8.0-windows7.0",
+            "targetAlias": "net8.0-windows",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.400"
+      },
+      "frameworks": {
+        "net8.0-windows": {
+          "framework": "net8.0-windows7.0",
+          "targetAlias": "net8.0-windows",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.401/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Host/MSFS2024AIPilot.Host.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Host/MSFS2024AIPilot.Host.csproj",
+        "projectName": "MSFS2024AIPilot.Host",
+        "projectPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Host/MSFS2024AIPilot.Host.csproj",
+        "packagesPath": "/home/runner/.nuget/packages/",
+        "outputPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Host/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/runner/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0-windows"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0-windows": {
+            "framework": "net8.0-windows7.0",
+            "targetAlias": "net8.0-windows",
+            "projectReferences": {
+              "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj": {
+                "projectPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.400"
+      },
+      "frameworks": {
+        "net8.0-windows": {
+          "framework": "net8.0-windows7.0",
+          "targetAlias": "net8.0-windows",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.401/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
