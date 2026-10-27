@@ -1,0 +1,11 @@
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/bin/Debug/net8.0-windows/MSFS2024AIPilot.Core.deps.json
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/bin/Debug/net8.0-windows/MSFS2024AIPilot.Core.dll
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/bin/Debug/net8.0-windows/MSFS2024AIPilot.Core.pdb
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.GeneratedMSBuildEditorConfig.editorconfig
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.AssemblyInfoInputs.cache
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.AssemblyInfo.cs
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.csproj.CoreCompileInputs.cache
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.dll
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/refint/MSFS2024AIPilot.Core.dll
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/MSFS2024AIPilot.Core.pdb
+/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/Debug/net8.0-windows/ref/MSFS2024AIPilot.Core.dll

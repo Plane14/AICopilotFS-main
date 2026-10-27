@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "MSFS2024AIPilot.Core/1.0.0": {
+        "runtime": {
+          "MSFS2024AIPilot.Core.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "MSFS2024AIPilot.Core/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
