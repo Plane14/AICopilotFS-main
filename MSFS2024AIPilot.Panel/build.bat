@@ -21,20 +21,50 @@ if not exist "%PACKAGE_TOOL%" (
   exit /b 1
 )
 
+REM --- Read configuration from simulator-paths.json ---------------------------------
+set "CONFIG_FILE=%PANEL_DIR%..\..\MSFS2024AIPilot.Host\simulator-paths.json"
+set "MSFS_EXE_CONFIG="
+set "MSFS_SDK_CONFIG="
+set "COMMUNITY_FOLDER_CONFIG="
+set "COMMUNITY2024_FOLDER_CONFIG="
+
+if exist "%CONFIG_FILE%" (
+  REM Use PowerShell to parse JSON config
+  for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command ^
+    "$config = Get-Content '%CONFIG_FILE%' -Raw | ConvertFrom-Json; ^
+     if ($config.msfsExecutablePath) { Write-Output \"MSFS_EXE=$config.msfsExecutablePath\" }; ^
+     if ($config.msfsSdkPath) { Write-Output \"MSFS_SDK=$config.msfsSdkPath\" }; ^
+     if ($config.communityFolder) { Write-Output \"COMMUNITY_FOLDER=$config.communityFolder\" }; ^
+     if ($config.community2024Folder) { Write-Output \"COMMUNITY2024_FOLDER=$config.community2024Folder\" }"`) do (
+    set "%%A"
+  )
+)
+
 REM --- Pre-flight: the tool needs the installed game -------------------------------
 set "FS_EXE="
 
-REM 1. An explicit override next to the tool wins.
-if exist "%SDK_DIR%\Tools\bin\fspackagetool_overrideExePath.txt" (
+REM 1. Config file override for MSFS executable
+if defined MSFS_EXE_CONFIG (
+  set "FS_EXE=%MSFS_EXE_CONFIG%"
+)
+
+REM 2. An explicit override next to the tool wins.
+if not defined FS_EXE if exist "%SDK_DIR%\Tools\bin\fspackagetool_overrideExePath.txt" (
   set /p FS_EXE=<"%SDK_DIR%\Tools\bin\fspackagetool_overrideExePath.txt"
 )
 
-REM 2. The Microsoft Store package.
+REM 3. Config file override for MSFS SDK
+if defined MSFS_SDK_CONFIG (
+  set "SDK_DIR=%MSFS_SDK_CONFIG%"
+  set "PACKAGE_TOOL=%SDK_DIR%\Tools\bin\fspackagetool.exe"
+)
+
+REM 4. The Microsoft Store package.
 if not defined FS_EXE (
   set "FS_EXE=%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages\FlightSimulator2024.exe"
 )
 
-REM 3. Common non-store locations.
+REM 5. Common non-store locations.
 if not exist "%FS_EXE%" (
   for %%D in (
     "C:\Program Files\Microsoft Flight Simulator 2024"
@@ -54,6 +84,8 @@ if not exist "%FS_EXE%" (
   echo Either install MSFS 2024 on this machine, or write the path to
   echo FlightSimulator2024.exe into:
   echo   %SDK_DIR%\Tools\bin\fspackagetool_overrideExePath.txt
+  echo.
+  echo Or set msfsExecutablePath in simulator-paths.json.
   echo.
   echo The panel sources in PackageSources\ are unchanged and can be inspected without
   echo the tool; see AGENTS.md for what still needs a live simulator to verify.
@@ -82,31 +114,46 @@ if not exist "%PANEL_DIR%Packages\msfs2024-ai-pilot" (
 )
 
 REM --- Install into the community folder ------------------------------------------
-set "USERCFG="
-for %%F in (
-  "%APPDATA%\Microsoft Flight Simulator 2024\UserCfg.opt"
-  "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt"
-  "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\UserCfg.opt"
-) do (
-  if not defined USERCFG if exist "%%~F" set "USERCFG=%%~F"
+set "COMMUNITY="
+
+REM 1. Config file override for Community2024 folder
+if defined COMMUNITY2024_FOLDER_CONFIG (
+  set "COMMUNITY=%COMMUNITY2024_FOLDER_CONFIG%"
 )
 
-set "PACKAGES_ROOT="
-if defined USERCFG (
-  for /f "usebackq tokens=1,* delims= " %%A in (`findstr /i /c:"InstalledPackagesPath" "%USERCFG%"`) do (
-    if /i "%%~A"=="InstalledPackagesPath" set "PACKAGES_ROOT=%%~B"
+REM 2. Config file override for Community folder
+if not defined COMMUNITY if defined COMMUNITY_FOLDER_CONFIG (
+  set "COMMUNITY=%COMMUNITY_FOLDER_CONFIG%"
+)
+
+REM 3. Auto-discovery from UserCfg.opt
+if not defined COMMUNITY (
+  set "USERCFG="
+  for %%F in (
+    "%APPDATA%\Microsoft Flight Simulator 2024\UserCfg.opt"
+    "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\UserCfg.opt"
+    "%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalState\UserCfg.opt"
+  ) do (
+    if not defined USERCFG if exist "%%~F" set "USERCFG=%%~F"
   )
-)
 
-if not defined PACKAGES_ROOT (
-  set "PACKAGES_ROOT=%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages"
-)
+  set "PACKAGES_ROOT="
+  if defined USERCFG (
+    for /f "usebackq tokens=1,* delims= " %%A in (`findstr /i /c:"InstalledPackagesPath" "%USERCFG%"`) do (
+      if /i "%%~A"=="InstalledPackagesPath" set "PACKAGES_ROOT=%%~B"
+    )
+  )
 
-REM The SDK docs recommend Community2024 for MSFS 2024-only packages; Community remains
-REM as a compatibility fallback when a 2024-specific folder is not available.
-set "COMMUNITY=%PACKAGES_ROOT%\Community2024"
-if not exist "%COMMUNITY%" (
-  set "COMMUNITY=%PACKAGES_ROOT%\Community"
+  if not defined PACKAGES_ROOT (
+    set "PACKAGES_ROOT=%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages"
+  )
+
+  REM The SDK docs recommend Community2024 for MSFS 2024-only packages; Community remains
+  REM as a compatibility fallback when a 2024-specific folder is not available.
+  set "COMMUNITY=%PACKAGES_ROOT%\Community2024"
+  if not exist "%COMMUNITY%" (
+    set "COMMUNITY=%PACKAGES_ROOT%\Community"
+  )
 )
 
 if not exist "%COMMUNITY%" (

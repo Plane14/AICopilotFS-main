@@ -1,8 +1,13 @@
 ﻿using MSFS2024AIPilot.Core;
+using System.IO;
 
 Console.Title = "MSFS 2024 AI Pilot";
 
-var pilot = new AIPilot();
+// Load simulator paths configuration
+var configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "simulator-paths.json");
+var simulatorPaths = SimulatorPathsConfig.LoadFromFile(configPath);
+
+var pilot = new AIPilot(simulatorPaths);
 
 pilot.OnStatus += s => Console.WriteLine($"[STATUS] {s}");
 pilot.OnPhaseChanged += (old, newPhase) => Console.WriteLine($"[PHASE] {old} -> {newPhase}");
@@ -26,6 +31,7 @@ Console.WriteLine("               squawk <code>, menu open|close|<n>, process <t
 Console.WriteLine("  checklist [run <STEP>|skip|reset|reload] - aircraft checklist status/control");
 Console.WriteLine("  pushback [request|dismiss] - pushback tug: status, request one, release one");
 Console.WriteLine("  automation [status|on|off|stop-after|continue|service <minutes>] - randomized flights");
+Console.WriteLine("  config [show|generate] - show or generate simulator paths configuration");
 Console.WriteLine("  status     - show current state");
 Console.WriteLine("  quit       - exit");
 Console.WriteLine();
@@ -314,6 +320,48 @@ while (running)
                         break;
                     case "reload":
                         pilot.ReloadChecklists();
+                        break;
+                }
+            }
+            break;
+        case "config":
+            {
+                var sub = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                var subCmd = sub.Length > 0 ? sub[0].ToLowerInvariant() : "";
+                switch (subCmd)
+                {
+                    case "show":
+                        Console.WriteLine("Current simulator paths configuration:");
+                        Console.WriteLine($"  Config file: {configPath}");
+                        Console.WriteLine($"  LocalAppData: {simulatorPaths.LocalAppData ?? "(default)"}");
+                        Console.WriteLine($"  ApplicationData: {simulatorPaths.ApplicationData ?? "(default)"}");
+                        Console.WriteLine($"  StorePackageFamily: {simulatorPaths.StorePackageFamily ?? "(default)"}");
+                        Console.WriteLine($"  InstalledPackagesPath: {simulatorPaths.InstalledPackagesPath ?? "(auto)"}");
+                        Console.WriteLine($"  CommunityFolder: {simulatorPaths.CommunityFolder ?? "(auto)"}");
+                        Console.WriteLine($"  Community2024Folder: {simulatorPaths.Community2024Folder ?? "(auto)"}");
+                        Console.WriteLine($"  VfsProjectionRoot: {simulatorPaths.VfsProjectionRoot ?? "(auto)"}");
+                        Console.WriteLine($"  UserCfgPath: {simulatorPaths.UserCfgPath ?? "(auto)"}");
+                        Console.WriteLine($"  FlightPlanPath: {simulatorPaths.FlightPlanPath ?? "(auto)"}");
+                        Console.WriteLine($"  MsfsExecutablePath: {simulatorPaths.MsfsExecutablePath ?? "(auto)"}");
+                        Console.WriteLine($"  MsfsSdkPath: {simulatorPaths.MsfsSdkPath ?? "(auto)"}");
+                        if (simulatorPaths.AdditionalAircraftSearchRoots?.Count > 0)
+                        {
+                            Console.WriteLine($"  AdditionalAircraftSearchRoots:");
+                            foreach (var root in simulatorPaths.AdditionalAircraftSearchRoots)
+                            {
+                                Console.WriteLine($"    - {root}");
+                            }
+                        }
+                        break;
+                    case "generate":
+                        var template = SimulatorPathsConfig.GetDefaultConfigTemplate();
+                        File.WriteAllText(configPath, template);
+                        Console.WriteLine($"Generated default config at: {configPath}");
+                        break;
+                    default:
+                        Console.WriteLine("Config commands:");
+                        Console.WriteLine("  config show      - show current configuration");
+                        Console.WriteLine("  config generate  - generate default config file");
                         break;
                 }
             }

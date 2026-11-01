@@ -21,7 +21,7 @@ public enum PilotControlState
 
 public sealed class AIPilot : IDisposable
 {
-    private readonly AircraftController _aircraft = new();
+    private readonly AircraftController _aircraft;
     private readonly AircraftPerformance _perf = new();
     private readonly HybridAutopilot _autopilot;
     private readonly FlightPhaseManager _phaseManager = new();
@@ -38,6 +38,7 @@ public sealed class AIPilot : IDisposable
     private readonly AirportFacilitiesLoader _facilities;
     private readonly Dictionary<string, AirportData> _airports = new(StringComparer.OrdinalIgnoreCase);
     private readonly Random _random = new();
+    private readonly SimulatorPathsConfig? _simulatorPaths;
 
     private PilotControlState _controlState = PilotControlState.Idle;
     private DateTime _lastFrame = DateTime.UtcNow;
@@ -105,8 +106,10 @@ public sealed class AIPilot : IDisposable
     public event Action<PilotControlState>? OnControlStateChanged;
     public event Action<string>? OnAtcLog;
 
-    public AIPilot()
+    public AIPilot(SimulatorPathsConfig? simulatorPaths = null)
     {
+        _simulatorPaths = simulatorPaths;
+        _aircraft = new AircraftController(_simulatorPaths);
         _autopilot = new HybridAutopilot(_aircraft.SimConnect, _perf, _envelope);
         _beyondAtc = new BeyondAtcBridge();
         _atc = new AtcCommunicationHub(_aircraft, null, Log);
@@ -789,7 +792,7 @@ public sealed class AIPilot : IDisposable
             // system-state path.
             var dir = !string.IsNullOrEmpty(_aircraft.AircraftDirectory)
                 ? _aircraft.AircraftDirectory
-                : (!string.IsNullOrWhiteSpace(title) ? AircraftPackageLocator.LocateAircraftDirectory(title) : null);
+                : (!string.IsNullOrWhiteSpace(title) ? AircraftPackageLocator.LocateAircraftDirectory(title, _simulatorPaths) : null);
 
             if (!string.IsNullOrEmpty(dir))
                 LoadAircraftChecklists(title, dir);
@@ -1019,7 +1022,7 @@ public sealed class AIPilot : IDisposable
 
         // Performance discovery may fall back to the first package that actually carries
         // flight-model/performance data, but only after a title/override match was tried.
-        return AircraftPackageLocator.LocateAircraftDirectoryForPerformance(_aircraftTitle, dirOverride);
+        return AircraftPackageLocator.LocateAircraftDirectoryForPerformance(_aircraftTitle, dirOverride, _simulatorPaths);
     }
 
     public void Stop()
@@ -4697,6 +4700,10 @@ public sealed class AIPilot : IDisposable
     {
         try
         {
+            if (_simulatorPaths != null)
+            {
+                return MsfsInstallLayout.Discover(_simulatorPaths).FindLatestFlightPlan();
+            }
             return MsfsInstallLayout.Discover().FindLatestFlightPlan();
         }
         catch { }
