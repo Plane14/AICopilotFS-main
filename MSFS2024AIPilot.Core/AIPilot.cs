@@ -37,6 +37,7 @@ public sealed class AIPilot : IDisposable
     private readonly PanelHttpBridge _httpBridge;
     private readonly AirportFacilitiesLoader _facilities;
     private readonly Dictionary<string, AirportData> _airports = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Random _random = new();
 
     private PilotControlState _controlState = PilotControlState.Idle;
     private DateTime _lastFrame = DateTime.UtcNow;
@@ -3453,6 +3454,14 @@ public sealed class AIPilot : IDisposable
     /// <summary>True when the gate could not be reached and the aircraft stopped short of it.</summary>
     private bool _unreachableGate;
 
+    private readonly RandomizedFlightOptions _randomizedFlights = new();
+    private DateTime _automationServiceUntilUtc;
+    private bool _automationPlanningInProgress;
+    private string _automationStatus = "Off";
+    private string _automationLastPlanSummary = "";
+    private int _automationLegsCompleted;
+    private string? _lastRandomDestinationIcao;
+
     /// <summary>Plans a route from the runway exit to an arrival gate after landing.</summary>
     private void PlanTaxiToGate(AircraftState s)
     {
@@ -3501,8 +3510,102 @@ public sealed class AIPilot : IDisposable
         // is not handed an aircraft held in place by the brakes alone.
         SetParkingBrake(true);
         SetWheelBrake(0);
+
+        if (TryContinueAutomationAfterShutdown(s))
+        {
+            return;
+        }
+
         Status("Shutdown complete - AI pilot disengaging");
         SetControlState(PilotControlState.Manual);
+    }
+
+    private bool TryContinueAutomationAfterShutdown(AircraftState s)
+    {
+        if (!_randomizedFlights.Enabled) return false;
+        if (_randomizedFlights.StopAfterThisFlight)
+        {
+            _automationStatus = "Stopped after current flight";
+            _randomizedFlights.Enabled = false;
+            _randomizedFlights.StopAfterThisFlight = false;
+            return false;
+        }
+
+        if (!_automationPlanningInProgress)
+        {
+            _automationPlanningInProgress = true;
+            var minutes = Math.Max(1, _randomizedFlights.ServiceMinutesBetweenLegs);
+            _automationServiceUntilUtc = DateTime.UtcNow.AddMinutes(minutes);
+            _automationStatus = $"Servicing aircraft ({minutes} min)";
+            Status($"Shutdown complete - servicing aircraft for {minutes} minutes before next randomized flight");
+            return true;
+        }
+
+        if (DateTime.UtcNow < _automationServiceUntilUtc)
+        {
+            return true;
+        }
+
+        if (!TryLoadNextRandomLeg(s, out var status))
+        {
+            _automationStatus = status;
+            _randomizedFlights.Enabled = false;
+            return false;
+        }
+
+        _automationPlanningInProgress = false;
+        _automationLegsCompleted++;
+        _phaseManager.Reset();
+        _phaseManager.ForcePhase(FlightPhase.Startup);
+        _startupComplete = false;
+        _taxiStarted = false;
+        _takeoffCleared = false;
+        _departureClearanceReceived = false;
+        _startupClearanceRequested = false;
+        _startupClearanceSent = false;
+        Status("Randomized flight loaded - starting next leg");
+        return true;
+    }
+
+    private bool TryLoadNextRandomLeg(AircraftState s, out string status)
+    {
+        status = "";
+        var departureIcao = s.Navigation.ArrivalICAO ?? s.Navigation.DepartureICAO ?? "";
+        if (string.IsNullOrWhiteSpace(departureIcao))
+        {
+            status = "Randomized flights stopped: no departure ICAO for next leg.";
+            return false;
+        }
+
+        if (!RandomizedFlightPlanner.TryPlanNextLeg(
+                departureIcao,
+                _airports.Values.ToList(),
+                _perf,
+                s,
+                _random,
+                _lastRandomDestinationIcao,
+                out var leg,
+                out var failure))
+        {
+            status = $"Randomized flights stopped: {failure}";
+            return false;
+        }
+
+        var departure = _airports[leg.DepartureIcao];
+        var destination = _airports[leg.DestinationIcao];
+        var pln = FlightPlanWriter.WriteLegPlanToTempPln(leg, departure, destination);
+        LoadFlightPlan(pln);
+
+        _targetCruiseAltitude = leg.CruiseAltitudeFt;
+        _lastRandomDestinationIcao = leg.DestinationIcao;
+        _automationLastPlanSummary =
+            $"{leg.DepartureIcao}->{leg.DestinationIcao} ALT {leg.CruiseAltitudeFt:F0}ft " +
+            $"ALTN {leg.AlternateIcao} FUEL {leg.Fuel.TotalGallons:F0}gal";
+        _automationStatus =
+            $"Leg planned: {leg.DepartureIcao} to {leg.DestinationIcao}, alternate {leg.AlternateIcao}";
+        Log($"[Automation] {_automationLastPlanSummary}");
+        status = _automationStatus;
+        return true;
     }
 
     private void ExecuteGoAround(AircraftState s, double dt)
@@ -3753,6 +3856,49 @@ public sealed class AIPilot : IDisposable
 
     public void RequestControlFromUser() => SetControlState(PilotControlState.Manual);
     public void TakeControlFromUser() => SetControlState(PilotControlState.AiActive);
+
+    public AutomationStatusSnapshot AutomationStatus() => new()
+    {
+        Enabled = _randomizedFlights.Enabled,
+        StopAfterThisFlight = _randomizedFlights.StopAfterThisFlight,
+        Status = _automationStatus,
+        LastPlanSummary = _automationLastPlanSummary,
+        LegsCompleted = _automationLegsCompleted
+    };
+
+    public string SetRandomizedFlightsEnabled(bool enabled)
+    {
+        _randomizedFlights.Enabled = enabled;
+        if (!enabled)
+        {
+            _randomizedFlights.StopAfterThisFlight = false;
+            _automationPlanningInProgress = false;
+            _automationServiceUntilUtc = default;
+            _automationStatus = "Off";
+            return "Randomized flights disabled.";
+        }
+
+        _automationStatus = "Enabled - waiting for shutdown";
+        return "Randomized flights enabled.";
+    }
+
+    public string RequestStopAfterThisFlight()
+    {
+        if (!_randomizedFlights.Enabled)
+            return "Randomized flights are not enabled.";
+        _randomizedFlights.StopAfterThisFlight = true;
+        _automationStatus = "Will stop after the current flight";
+        return "Automation will stop after this flight.";
+    }
+
+    public string ClearStopAfterThisFlight()
+    {
+        if (!_randomizedFlights.Enabled)
+            return "Randomized flights are not enabled.";
+        _randomizedFlights.StopAfterThisFlight = false;
+        _automationStatus = "Enabled - continuing";
+        return "Automation will continue with the next flight.";
+    }
 
     #endregion
 
@@ -4356,6 +4502,41 @@ public sealed class AIPilot : IDisposable
         "off" or "false" or "0" or "no" => false,
         _ => !current
     };
+
+    public string RunAutomationCommand(string? arg)
+    {
+        var parts = (arg ?? "").Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        var sub = parts.Length > 0 ? parts[0].ToLowerInvariant() : "status";
+        var value = parts.Length > 1 ? parts[1].Trim() : "";
+
+        return sub switch
+        {
+            "status" or "" => DescribeAutomationStatus(),
+            "on" or "enable" => SetRandomizedFlightsEnabled(true),
+            "off" or "disable" => SetRandomizedFlightsEnabled(false),
+            "toggle" => SetRandomizedFlightsEnabled(!_randomizedFlights.Enabled),
+            "stop-after" => RequestStopAfterThisFlight(),
+            "continue" => ClearStopAfterThisFlight(),
+            "service" when Parsing.TryInt32(value, out var minutes) =>
+                SetServiceMinutes(minutes),
+            _ => "Usage: automation [status|on|off|toggle|stop-after|continue|service <minutes>]"
+        };
+    }
+
+    private string SetServiceMinutes(int minutes)
+    {
+        _randomizedFlights.ServiceMinutesBetweenLegs = Math.Clamp(minutes, 1, 120);
+        return $"Turnaround service set to {_randomizedFlights.ServiceMinutesBetweenLegs} minutes.";
+    }
+
+    private string DescribeAutomationStatus()
+    {
+        var mode = _randomizedFlights.Enabled ? "enabled" : "off";
+        var stop = _randomizedFlights.StopAfterThisFlight ? "yes" : "no";
+        var last = string.IsNullOrWhiteSpace(_automationLastPlanSummary) ? "-" : _automationLastPlanSummary;
+        return $"Randomized flights: {mode}, stop-after-this-flight: {stop}, service: {_randomizedFlights.ServiceMinutesBetweenLegs} min, " +
+               $"legs completed: {_automationLegsCompleted}, status: {_automationStatus}, last leg: {last}";
+    }
 
     public AtcStatusSnapshot AtcStatus() => _atc.Snapshot(_latestSnapshot);
 

@@ -261,6 +261,18 @@ public class PanelStatusContractTests
     }
 
     [Fact]
+    public void StatusCarriesTheAutomationBlock()
+    {
+        var doc = System.Text.Json.JsonDocument.Parse(StatusJson());
+        Assert.True(doc.RootElement.TryGetProperty("automation", out var automation), "panel reads automation");
+
+        foreach (var name in new[] { "enabled", "stopAfterThisFlight", "status", "lastPlanSummary", "legsCompleted" })
+        {
+            Assert.True(automation.TryGetProperty(name, out _), $"panel reads automation.{name}");
+        }
+    }
+
+    [Fact]
     public void ControlStateTransitionUpdatesState()
     {
         var pilot = new AIPilot();

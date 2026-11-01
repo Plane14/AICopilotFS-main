@@ -133,6 +133,10 @@ ingame-ui#AIPilotPanel .aipilot-actions new-push-button {
   width: 100%;
 }
 
+ingame-ui#AIPilotPanel #btnStopAfter {
+  margin-top: 4px;
+}
+
 /* Route and log. */
 ingame-ui#AIPilotPanel .aipilot-route {
   padding: 4px 8px;

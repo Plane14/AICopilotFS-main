@@ -37,6 +37,7 @@ class IngamePanelAIPilot extends TemplateElement {
         this.elTraffic = document.getElementById("trafficLine");
         this.elWeather = document.getElementById("weatherLine");
         this.elLimits = document.getElementById("limitsLine");
+        this.elAutomation = document.getElementById("automationLine");
         this.elAltAgl = document.getElementById("altAgl");
         this.elIas = document.getElementById("ias");
         this.elHdg = document.getElementById("hdg");
@@ -53,6 +54,12 @@ class IngamePanelAIPilot extends TemplateElement {
         button.addEventListener("click", () => {
             this.sendCommand("toggle");
         });
+        const stopAfterButton = document.getElementById("btnStopAfter");
+        if (stopAfterButton) {
+            stopAfterButton.addEventListener("click", () => {
+                this.sendCommand("automation?arg=stop-after");
+            });
+        }
 
         // Poll the bridge. 4 Hz is fast enough to read and cheap enough to run in the
         // toolbar without competing with the flight.
@@ -132,6 +139,7 @@ class IngamePanelAIPilot extends TemplateElement {
         this.renderTraffic(status.traffic);
         this.renderWeather(status.weather);
         this.renderLimits(status.limits);
+        this.renderAutomation(status.automation);
 
         const aircraft = status.aircraft || {};
         this.setNumber(this.elAltAgl, aircraft.altitudeAGL, "ft");
@@ -166,6 +174,14 @@ class IngamePanelAIPilot extends TemplateElement {
             // textContent, so the visible caption is title.
             button.title = isAi ? "TAKE CONTROL" : "DELEGATE TO AI";
             button.classList.toggle("is-ai", isAi);
+        }
+
+        const stopAfterButton = document.getElementById("btnStopAfter");
+        if (stopAfterButton) {
+            const automation = status.automation || {};
+            stopAfterButton.title = automation.stopAfterThisFlight === true
+                ? "STOP REQUESTED"
+                : "STOP AFTER THIS FLIGHT";
         }
     }
 
@@ -329,6 +345,23 @@ class IngamePanelAIPilot extends TemplateElement {
     renderNavData(nav) {
         if (!this.elNav) {
             return;
+        }
+
+        renderAutomation(automation) {
+            if (!this.elAutomation) {
+                return;
+            }
+            const a = automation || {};
+            if (a.enabled !== true) {
+                this.elAutomation.textContent = "Automation: off";
+                this.elAutomation.classList.toggle("is-warning", false);
+                return;
+            }
+
+            const legs = Number(a.legsCompleted) || 0;
+            const status = a.status || "enabled";
+            this.elAutomation.textContent = `Automation: ${status} (legs ${legs})`;
+            this.elAutomation.classList.toggle("is-warning", a.stopAfterThisFlight === true);
         }
         const n = nav || {};
         const unresolved = (n.unresolvedFixes || []).length;
