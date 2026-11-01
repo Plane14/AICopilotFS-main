@@ -1,0 +1,41 @@
+{
+  // MSFS 2024 Simulator Paths Configuration
+  // All paths are optional - defaults will be auto-discovered when not specified.
+  // Copy this file to simulator-paths.json next to the host EXE and customize as needed.
+  
+  // LocalApplicationData folder (typically %LOCALAPPDATA%)
+  "localAppData": null,
+  
+  // ApplicationData folder (typically %APPDATA%)
+  "applicationData": null,
+  
+  // Microsoft Store package family name (default: Microsoft.Limitless_8wekyb3d8bbwe)
+  "storePackageFamily": null,
+  
+  // Explicit installed packages root (overrides UserCfg.opt discovery)
+  "installedPackagesPath": null,
+  
+  // Explicit Community folder path
+  "communityFolder": null,
+  
+  // Explicit Community2024 folder path (MSFS 2024 specific)
+  "community2024Folder": null,
+  
+  // Explicit VFS projection root (simobjects, etc.)
+  "vfsProjectionRoot": null,
+  
+  // Explicit UserCfg.opt path
+  "userCfgPath": null,
+  
+  // Explicit flight plan path (CUSTOMFLIGHT.PLN)
+  "flightPlanPath": null,
+  
+  // MSFS 2024 executable path (for panel building)
+  "msfsExecutablePath": null,
+  
+  // MSFS SDK path (for panel building)
+  "msfsSdkPath": null,
+  
+  // Additional aircraft search roots
+  "additionalAircraftSearchRoots": []
+}

@@ -16,18 +16,26 @@ public static class AircraftPackageLocator
 {
     internal static List<string> SearchRoots() => new(MsfsInstallLayout.Discover().AircraftSearchRoots);
 
+    internal static List<string> SearchRoots(SimulatorPathsConfig config) => new(MsfsInstallLayout.Discover(config).AircraftSearchRoots);
+
     /// <summary>
     /// Resolves the aircraft package directory. When <paramref name="rootOverride"/>
     /// is provided (e.g. from the .air file path reported by the AircraftLoaded
     /// system state), the filesystem scan is skipped entirely.
     /// </summary>
     public static string? LocateAircraftDirectory(string title, string? rootOverride = null)
-        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: false);
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: false, config: null);
+
+    internal static string? LocateAircraftDirectory(string title, string? rootOverride, SimulatorPathsConfig? config)
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: false, config);
 
     internal static string? LocateAircraftDirectoryForPerformance(string title, string? rootOverride = null)
-        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: true);
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: true, config: null);
 
-    private static string? LocateAircraftDirectoryCore(string title, string? rootOverride, bool allowProfileFallback)
+    internal static string? LocateAircraftDirectoryForPerformance(string title, string? rootOverride, SimulatorPathsConfig? config)
+        => LocateAircraftDirectoryCore(title, rootOverride, allowProfileFallback: true, config);
+
+    private static string? LocateAircraftDirectoryCore(string title, string? rootOverride, bool allowProfileFallback, SimulatorPathsConfig? config)
     {
         var overrideDir = ResolveOverrideDirectory(rootOverride);
         if (!string.IsNullOrEmpty(overrideDir))
@@ -48,7 +56,7 @@ public static class AircraftPackageLocator
         if (string.IsNullOrWhiteSpace(title))
             return null;
 
-        return LocateAcrossRoots(title, SearchRoots(), allowProfileFallback);
+        return LocateAcrossRoots(title, config != null ? SearchRoots(config) : SearchRoots(), allowProfileFallback);
     }
 
     private static string? LocateWithinOverrideRoot(string title, string rootOverride, bool allowProfileFallback)
@@ -94,7 +102,7 @@ public static class AircraftPackageLocator
             ? new List<string>()
             : null;
 
-        foreach (var root in SearchRoots())
+        foreach (var root in roots)
         {
             try
             {

@@ -17,6 +17,7 @@ public sealed class AircraftController
     private string _aircraftTitle = "";
     private string _aircraftDirectory = ""; // Stores the directory from .air file path
     private readonly Dictionary<uint, string> _requestMap = new();
+    private readonly SimulatorPathsConfig? _simulatorPaths;
 
     private uint _reqPosition, _reqAttitude, _reqSpeeds, _reqEngines;
     private uint _reqEngineLimits;
@@ -42,6 +43,11 @@ public sealed class AircraftController
     public SimConnectManager SimConnect => _sc;
     public string AircraftTitle => _aircraftTitle;
     public string AircraftDirectory => _aircraftDirectory;
+
+    public AircraftController(SimulatorPathsConfig? simulatorPaths = null)
+    {
+        _simulatorPaths = simulatorPaths;
+    }
 
     public async System.Threading.Tasks.Task StartAsync()
     {
@@ -79,12 +85,12 @@ public sealed class AircraftController
         string? resolvedDir = null;
         if (!string.IsNullOrWhiteSpace(dirHint))
         {
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(string.Empty, dirHint);
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(string.Empty, dirHint, _simulatorPaths);
         }
 
         if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleHint))
         {
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint);
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint, _simulatorPaths);
         }
 
         if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
@@ -707,7 +713,7 @@ public sealed class AircraftController
 
                     if (string.IsNullOrWhiteSpace(_aircraftDirectory))
                     {
-                        var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle);
+                        var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle, _simulatorPaths);
                         if (!string.IsNullOrWhiteSpace(dir))
                         {
                             _aircraftDirectory = dir;

@@ -15,6 +15,8 @@ internal sealed class MsfsInstallLayout
 
     private readonly string _localAppData;
     private readonly string _applicationData;
+    private readonly string _storePackageFamily;
+    private readonly SimulatorPathsConfig? _config;
 
     public string StorePackageRoot { get; }
     public string VfsProjectionRoot { get; }
@@ -34,6 +36,7 @@ internal sealed class MsfsInstallLayout
     private MsfsInstallLayout(
         string localAppData,
         string applicationData,
+        string storePackageFamily,
         string storePackageRoot,
         string vfsProjectionRoot,
         string? userCfgPath,
@@ -47,10 +50,13 @@ internal sealed class MsfsInstallLayout
         string? legacyCommunityFolder,
         string? legacyOfficialFolder,
         IReadOnlyList<string> packageRoots,
-        IReadOnlyList<string> aircraftSearchRoots)
+        IReadOnlyList<string> aircraftSearchRoots,
+        SimulatorPathsConfig? config = null)
     {
         _localAppData = localAppData;
         _applicationData = applicationData;
+        _storePackageFamily = storePackageFamily;
+        _config = config;
         StorePackageRoot = storePackageRoot;
         VfsProjectionRoot = vfsProjectionRoot;
         UserCfgPath = userCfgPath;
@@ -74,14 +80,40 @@ internal sealed class MsfsInstallLayout
         return Discover(localAppData, applicationData);
     }
 
+    public static MsfsInstallLayout Discover(SimulatorPathsConfig config)
+    {
+        var localAppData = config.GetLocalAppData();
+        var applicationData = config.GetApplicationData();
+        return Discover(localAppData, applicationData, config);
+    }
+
     internal static MsfsInstallLayout Discover(string localAppData, string applicationData)
     {
-        var storePackageRoot = Path.Combine(localAppData, "Packages", StorePackageFamily);
-        var vfsProjectionRoot = Path.Combine(storePackageRoot, "LocalState", "VFSProjection");
-        var userCfgPath = FindFirstExistingFile(DefaultUserCfgCandidates(localAppData, applicationData));
-        var installedPackagesPath = !string.IsNullOrEmpty(userCfgPath)
-            ? ParseInstalledPackagesPath(userCfgPath)
-            : null;
+        return Discover(localAppData, applicationData, null);
+    }
+
+    internal static MsfsInstallLayout Discover(string localAppData, string applicationData, SimulatorPathsConfig? config)
+    {
+        var storePackageFamily = config?.GetStorePackageFamily() ?? StorePackageFamily;
+        var storePackageRoot = Path.Combine(localAppData, "Packages", storePackageFamily);
+
+        var vfsProjectionRoot = config?.VfsProjectionRoot ?? Path.Combine(storePackageRoot, "LocalState", "VFSProjection");
+
+        string? userCfgPath;
+        if (!string.IsNullOrWhiteSpace(config?.UserCfgPath))
+        {
+            userCfgPath = config.UserCfgPath;
+        }
+        else
+        {
+            userCfgPath = FindFirstExistingFile(DefaultUserCfgCandidates(localAppData, applicationData, storePackageFamily));
+        }
+
+        var installedPackagesPath = config?.InstalledPackagesPath;
+        if (string.IsNullOrWhiteSpace(installedPackagesPath) && !string.IsNullOrEmpty(userCfgPath))
+        {
+            installedPackagesPath = ParseInstalledPackagesPath(userCfgPath);
+        }
 
         if (string.IsNullOrWhiteSpace(installedPackagesPath))
         {
@@ -90,8 +122,8 @@ internal sealed class MsfsInstallLayout
                 installedPackagesPath = fallbackPackages;
         }
 
-        var communityFolder = CombineIfRootExists(installedPackagesPath, "Community");
-        var community2024Folder = CombineIfRootExists(installedPackagesPath, "Community2024");
+        var communityFolder = config?.CommunityFolder ?? CombineIfRootExists(installedPackagesPath, "Community");
+        var community2024Folder = config?.Community2024Folder ?? CombineIfRootExists(installedPackagesPath, "Community2024");
         var official2020Folder = CombineIfRootExists(installedPackagesPath, "Official2020");
         var official2024Folder = CombineIfRootExists(installedPackagesPath, "Official2024");
         var wasmCommunityFolder = Path.Combine(storePackageRoot, "LocalState", "WASM", "Community");
@@ -121,9 +153,23 @@ internal sealed class MsfsInstallLayout
             legacyCommunityFolder,
             legacyOfficialFolder);
 
+        if (config?.AdditionalAircraftSearchRoots != null)
+        {
+            var additional = new List<string>(aircraftSearchRoots);
+            foreach (var root in config.AdditionalAircraftSearchRoots)
+            {
+                if (Directory.Exists(root) && !additional.Contains(root, StringComparer.OrdinalIgnoreCase))
+                {
+                    additional.Add(root);
+                }
+            }
+            aircraftSearchRoots = additional;
+        }
+
         return new MsfsInstallLayout(
             localAppData,
             applicationData,
+            storePackageFamily,
             storePackageRoot,
             vfsProjectionRoot,
             userCfgPath,
@@ -137,7 +183,8 @@ internal sealed class MsfsInstallLayout
             legacyCommunityFolder,
             legacyOfficialFolder,
             packageRoots,
-            aircraftSearchRoots);
+            aircraftSearchRoots,
+            config);
     }
 
     public string? PreferredCommunityInstallFolder()
@@ -167,16 +214,21 @@ internal sealed class MsfsInstallLayout
 
     internal IEnumerable<string> EnumerateFlightPlanCandidates()
     {
+        if (!string.IsNullOrWhiteSpace(_config?.FlightPlanPath))
+        {
+            yield return _config.FlightPlanPath;
+        }
+
         yield return Path.Combine(_applicationData, "Microsoft Flight Simulator 2024", "LocalState", "CUSTOMFLIGHT.PLN");
         yield return Path.Combine(StorePackageRoot, "LocalState", "CUSTOMFLIGHT.PLN");
-        yield return Path.Combine(_localAppData, "Packages", StorePackageFamily, "LocalState", "CUSTOMFLIGHT.PLN");
+        yield return Path.Combine(_localAppData, "Packages", _storePackageFamily, "LocalState", "CUSTOMFLIGHT.PLN");
     }
 
-    internal static IEnumerable<string> DefaultUserCfgCandidates(string localAppData, string applicationData)
+    internal static IEnumerable<string> DefaultUserCfgCandidates(string localAppData, string applicationData, string storePackageFamily)
     {
         yield return Path.Combine(applicationData, "Microsoft Flight Simulator 2024", "UserCfg.opt");
-        yield return Path.Combine(localAppData, "Packages", StorePackageFamily, "LocalCache", "UserCfg.opt");
-        yield return Path.Combine(localAppData, "Packages", StorePackageFamily, "LocalState", "UserCfg.opt");
+        yield return Path.Combine(localAppData, "Packages", storePackageFamily, "LocalCache", "UserCfg.opt");
+        yield return Path.Combine(localAppData, "Packages", storePackageFamily, "LocalState", "UserCfg.opt");
     }
 
     internal static string? ParseInstalledPackagesPath(string userCfgPath)
