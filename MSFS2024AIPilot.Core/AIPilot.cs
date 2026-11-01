@@ -792,7 +792,7 @@ public sealed class AIPilot : IDisposable
             // system-state path.
             var dir = !string.IsNullOrEmpty(_aircraft.AircraftDirectory)
                 ? _aircraft.AircraftDirectory
-                : (!string.IsNullOrWhiteSpace(title) ? AircraftPackageLocator.LocateAircraftDirectory(title, _simulatorPaths) : null);
+                : (!string.IsNullOrWhiteSpace(title) ? AircraftPackageLocator.LocateAircraftDirectory(title, null, _simulatorPaths) : null);
 
             if (!string.IsNullOrEmpty(dir))
                 LoadAircraftChecklists(title, dir);

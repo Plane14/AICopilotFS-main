@@ -9,14 +9,14 @@
         dotnet build -p:MsfsSdkDir="C:\MSFS SDK"
       Search order:
         1. -p:MsfsSdkDir=... passed to the build
-        2. The "MSFS 2024 SDK" folder inside this repo
+        2. The "SimConnect SDK" folder inside this repo
         3. The SDK installed with MSFS 2024 (Microsoft Store install)
     -->
-    <MsfsSdkDir Condition=" '$(MsfsSdkDir)' == '' ">$(MSBuildThisFileDirectory)..\MSFS 2024 SDK</MsfsSdkDir>
+    <MsfsSdkDir Condition=" '$(MsfsSdkDir)' == '' ">$(MSBuildThisFileDirectory)..\SimConnect SDK</MsfsSdkDir>
   </PropertyGroup>
 
   <PropertyGroup>
-    <SimConnectDll>$(MsfsSdkDir)/SimConnect SDK/lib/SimConnect.dll</SimConnectDll>
+    <SimConnectDll>$(MsfsSdkDir)/lib/SimConnect.dll</SimConnectDll>
     <!-- Fallback to the SimConnect.dll that ships with an installed MSFS 2024 -->
     <SimConnectDll Condition=" !Exists('$(SimConnectDll)') and '$(LocalAppData)' != '' ">
       $(LocalAppData)\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\SimConnect SDK\lib\SimConnect.dll

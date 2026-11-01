@@ -90,7 +90,7 @@ public sealed class AircraftController
 
         if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleHint))
         {
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint, _simulatorPaths);
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint, null, _simulatorPaths);
         }
 
         if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
@@ -713,7 +713,7 @@ public sealed class AircraftController
 
                     if (string.IsNullOrWhiteSpace(_aircraftDirectory))
                     {
-                        var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle, _simulatorPaths);
+                        var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle, null, _simulatorPaths);
                         if (!string.IsNullOrWhiteSpace(dir))
                         {
                             _aircraftDirectory = dir;
