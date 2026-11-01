@@ -25,6 +25,7 @@ Console.WriteLine("  atc [cmd]   - ATC bridge: status, native/beyond/auto, reque
 Console.WriteLine("               squawk <code>, menu open|close|<n>, process <text>, cpdlc");
 Console.WriteLine("  checklist [run <STEP>|skip|reset|reload] - aircraft checklist status/control");
 Console.WriteLine("  pushback [request|dismiss] - pushback tug: status, request one, release one");
+Console.WriteLine("  automation [status|on|off|stop-after|continue|service <minutes>] - randomized flights");
 Console.WriteLine("  status     - show current state");
 Console.WriteLine("  quit       - exit");
 Console.WriteLine();
@@ -223,6 +224,7 @@ while (running)
                 : "within limits";
             Console.WriteLine($"Limits:  {limitsLine}");
             Console.WriteLine($"        {pilot.LimitsText}");
+            Console.WriteLine($"Auto:    {pilot.RunAutomationCommand("status")}");
             break;
         case "traffic":
             {
@@ -245,6 +247,10 @@ while (running)
             break;
         case "atc":
             Console.WriteLine(pilot.RunAtcCommand(arg));
+            break;
+        case "automation":
+        case "auto":
+            Console.WriteLine(pilot.RunAutomationCommand(arg));
             break;
         case "pushback":
             {

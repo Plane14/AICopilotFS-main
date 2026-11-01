@@ -10,7 +10,7 @@
         "projectUniqueName": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj",
         "projectName": "MSFS2024AIPilot.Core",
         "projectPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj",
-        "packagesPath": "/home/runner/.nuget/packages/",
+        "packagesPath": "/tmp/codeql-scratch-6af1e0883b8bf436/dbs/csharp/working/packages",
         "outputPath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
@@ -56,12 +56,22 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[8.0.33, 8.0.33]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[8.0.33, 8.0.33]"
+            }
+          ],
           "frameworkReferences": {
             "Microsoft.NETCore.App": {
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.401/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.403/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MSFS2024AIPilot.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7166432e057cfe421e3846b5f7b52baf61d1f688")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ad4708ce1bee7012d8bd640c7af8cd4cf164b111")]
 [assembly: System.Reflection.AssemblyProductAttribute("MSFS2024AIPilot.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MSFS2024AIPilot.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

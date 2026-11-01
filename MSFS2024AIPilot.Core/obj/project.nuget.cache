@@ -1,8 +1,11 @@
 {
   "version": 2,
-  "dgSpecHash": "3FF2T4FjiL8=",
+  "dgSpecHash": "j/5Rg59gVHs=",
   "success": true,
   "projectFilePath": "/home/runner/work/AICopilotFS-main/AICopilotFS-main/MSFS2024AIPilot.Core/MSFS2024AIPilot.Core.csproj",
-  "expectedPackageFiles": [],
+  "expectedPackageFiles": [
+    "/tmp/codeql-scratch-6af1e0883b8bf436/dbs/csharp/working/packages/microsoft.netcore.app.ref/8.0.33/microsoft.netcore.app.ref.8.0.33.nupkg.sha512",
+    "/tmp/codeql-scratch-6af1e0883b8bf436/dbs/csharp/working/packages/microsoft.aspnetcore.app.ref/8.0.33/microsoft.aspnetcore.app.ref.8.0.33.nupkg.sha512"
+  ],
   "logs": []
 }

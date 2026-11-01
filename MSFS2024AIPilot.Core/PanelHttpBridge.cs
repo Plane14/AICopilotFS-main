@@ -139,6 +139,12 @@ public sealed class PanelHttpBridge : IDisposable
                     var atcText = pilot.RunAtcCommand(atcArg);
                     jsonResponse = PanelJson.Serialize(new { ok = true, text = atcText });
                     break;
+
+                case "automation":
+                    var automationArg = req.QueryString["arg"];
+                    var automationText = pilot.RunAutomationCommand(automationArg);
+                    jsonResponse = PanelJson.Serialize(new { ok = true, text = automationText });
+                    break;
             }
 
             var buffer = Encoding.UTF8.GetBytes(jsonResponse);
@@ -208,6 +214,7 @@ public sealed class PanelHttpBridge : IDisposable
             }),
             nav = BuildNavJson(pilot),
             atc = BuildAtcJson(pilot),
+            automation = BuildAutomationJson(pilot),
             checklist = BuildChecklistJson(pilot),
             pushback = BuildPushbackJson(pilot),
             traffic = BuildTrafficJson(pilot),
@@ -290,6 +297,19 @@ public sealed class PanelHttpBridge : IDisposable
             autoRequest = atc.AutoRequest,
             autoTune = atc.AutoTune,
             instructionsFromSim = atc.InstructionsFromSim
+        };
+    }
+
+    private static object BuildAutomationJson(AIPilot pilot)
+    {
+        var automation = pilot.AutomationStatus();
+        return new
+        {
+            enabled = automation.Enabled,
+            stopAfterThisFlight = automation.StopAfterThisFlight,
+            status = automation.Status,
+            lastPlanSummary = automation.LastPlanSummary,
+            legsCompleted = automation.LegsCompleted
         };
     }
 
