@@ -92,7 +92,14 @@ while (running)
                 if (latest != null)
                     pilot.LoadFlightPlan(latest);
                 else
+                {
                     Console.WriteLine("No flight plan found. Specify a .pln path.");
+                    Console.WriteLine("Search paths:");
+                    foreach (var path in pilot.GetFlightPlanSearchPaths())
+                    {
+                        Console.WriteLine($"  {path} {(File.Exists(path) ? "[EXISTS]" : "[NOT FOUND]")}");
+                    }
+                }
             }
             break;
         case "airport":

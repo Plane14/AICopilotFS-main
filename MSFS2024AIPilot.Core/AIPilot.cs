@@ -478,6 +478,15 @@ public sealed class AIPilot : IDisposable
         var nav = state.Navigation;
         if (nav.Waypoints.Count == 0 && _navRoute is not null) return;
 
+        if (nav.Waypoints.Count == 0)
+        {
+            Log("[NavData] cannot build route: flight plan has no waypoints (no flight plan loaded?)");
+            _navRoute = new NavRoutePlan();
+            _navFollower = null;
+            _missedFollower = null;
+            return;
+        }
+
         var arrivalAirport = GetAirport(nav.ArrivalICAO ?? "") ??
                              _airports.Values.FirstOrDefault(a => a.IsLoaded);
         var departureAirport = GetAirport(nav.DepartureICAO ?? "");
@@ -495,8 +504,8 @@ public sealed class AIPilot : IDisposable
 
         if (!route.HasRoute)
         {
-            Log($"[NavData] route carries no geometry yet" +
-                (route.HasUnresolvedFixes ? $" ({route.UnresolvedFixes.Count} fixes unresolved)" : ""));
+            Log($"[NavData] route carries no geometry yet ({nav.Waypoints.Count} waypoints in plan" +
+                (route.HasUnresolvedFixes ? $", {route.UnresolvedFixes.Count} fixes unresolved" : "") + ")");
             return;
         }
 
@@ -845,6 +854,7 @@ public sealed class AIPilot : IDisposable
         }
         else
         {
+            Log("No flight plan found at startup. Use 'plan <path>' console command or the panel to load a flight plan.");
             // No plan: the sim's own ATC still knows where the aircraft is going, and its
             // designated runways are what the route would be built from.
             RequestNavData(_aircraft.State.Navigation.ArrivalICAO);
@@ -3734,6 +3744,10 @@ public sealed class AIPilot : IDisposable
         switch (newState)
         {
             case PilotControlState.AiActive:
+                if (_latestSnapshot.Navigation.Waypoints.Count == 0)
+                {
+                    Log("WARNING: Engaging AI without a loaded flight plan. The aircraft will not have a route to follow. Load a flight plan with 'plan <path>' or the panel.");
+                }
                 Log("AI control ENGAGED");
                 Status("AI pilot engaged");
                 _autopilot.Mode = AutopilotMode.Hybrid;
@@ -4708,6 +4722,18 @@ public sealed class AIPilot : IDisposable
         }
         catch { }
         return null;
+    }
+
+    /// <summary>
+    /// Returns the flight plan file paths that are searched for the active flight plan.
+    /// Useful for debugging when no flight plan is found.
+    /// </summary>
+    public IEnumerable<string> GetFlightPlanSearchPaths()
+    {
+        var layout = _simulatorPaths != null
+            ? MsfsInstallLayout.Discover(_simulatorPaths)
+            : MsfsInstallLayout.Discover();
+        return layout.EnumerateFlightPlanCandidates();
     }
 
     #endregion
