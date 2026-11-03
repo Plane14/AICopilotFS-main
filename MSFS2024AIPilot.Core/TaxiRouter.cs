@@ -201,6 +201,16 @@ public static class TaxiRouter
             }
         }
 
+        // A parking spot must be wide enough for the aircraft's wingspan: the spot's
+        // diameter (2 * radius) must exceed the aircraft's span. A zero radius means the
+        // simulator did not publish one, which is treated as unconstrained.
+        var endNode = airport.FindNode(edge.To);
+        if (endNode is not null && endNode.Type == GroundNodeType.Parking &&
+            endNode.ParkingRadiusMeters > 0 && constraints.MinWidthMeters > 0)
+        {
+            if (2.0 * endNode.ParkingRadiusMeters < constraints.MinWidthMeters) return false;
+        }
+
         return true;
     }
 
