@@ -1734,7 +1734,7 @@ public sealed class AIPilot : IDisposable
             _autopilot.ThrottleCommand = 0.25;
             if (_runwayHeading != 0)
             {
-                _autopilot.BankCommand = Math.Clamp(NormalizeDeg(_runwayHeading - s.Heading) * 0.02, -0.4, 0.4);
+                _autopilot.BankCommand = Math.Clamp(Geo.NormalizeDegrees(_runwayHeading - s.Heading) * 0.02, -0.4, 0.4);
             }
             SetWheelBrake(0);
         }
@@ -2100,7 +2100,7 @@ public sealed class AIPilot : IDisposable
         if (runwayDistance > 0 &&
             runwayDistance < RunwayHoldShortFallbackMeters &&
             _runwayHeading != 0 &&
-            Math.Abs(NormalizeDeg(_runwayHeading - s.Heading)) < RunwayHoldShortAlignmentDeg)
+            Math.Abs(Geo.NormalizeDegrees(_runwayHeading - s.Heading)) < RunwayHoldShortAlignmentDeg)
         {
             return true;
         }
@@ -2658,7 +2658,7 @@ public sealed class AIPilot : IDisposable
         _autopilot.EngageMaster();               // keep the FD/yaw damper
         _autopilot.ThrottleCommand = Math.Min(1.0, _envelope.MaxThrottle);
 
-        var headingError = NormalizeDeg(_runwayHeading - s.Heading);
+        var headingError = Geo.NormalizeDegrees(_runwayHeading - s.Heading);
         _autopilot.BankCommand = Math.Clamp(headingError * 0.02, -0.5, 0.5);
 
         // Centre via rudder on the runway, because ailerons alone will drag a wingtip.
@@ -2864,7 +2864,7 @@ public sealed class AIPilot : IDisposable
     }
 
     /// <summary>Flap handle index as a whole number, for a configuration limit lookup.</summary>
-    private static int FlapIndex(AircraftState s) => (int)Math.Round(s.FlapsHandleIndex);
+    internal static int FlapIndex(AircraftState s) => (int)Math.Round(s.FlapsHandleIndex);
 
     private void ExecuteCruise(AircraftState s, double dt)
     {
@@ -4664,7 +4664,7 @@ public sealed class AIPilot : IDisposable
             }
             else if (nav.Waypoints.Count >= 2 && nav.Waypoints[0].HasPosition && nav.Waypoints[1].HasPosition)
             {
-                _departureRunwayHeading = Bearing(
+                _departureRunwayHeading = Geo.BearingDegrees(
                     nav.Waypoints[0].Latitude, nav.Waypoints[0].Longitude,
                     nav.Waypoints[1].Latitude, nav.Waypoints[1].Longitude);
             }
@@ -4826,25 +4826,6 @@ public sealed class AIPilot : IDisposable
             File.AppendAllText(_logPath, line + Environment.NewLine);
         }
         catch { }
-    }
-
-    private static double NormalizeDeg(double deg)
-    {
-        while (deg > 180) deg -= 360;
-        while (deg < -180) deg += 360;
-        return deg;
-    }
-
-    /// <summary>Initial great-circle bearing in degrees from one point to another.</summary>
-    private static double Bearing(double lat1, double lon1, double lat2, double lon2)
-    {
-        const double R2D = 180.0 / Math.PI;
-        var dLon = (lon2 - lon1) * Math.PI / 180.0;
-        var y = Math.Sin(dLon) * Math.Cos(lat2 * Math.PI / 180.0);
-        var x = Math.Cos(lat1 * Math.PI / 180.0) * Math.Sin(lat2 * Math.PI / 180.0) -
-                Math.Sin(lat1 * Math.PI / 180.0) * Math.Cos(lat2 * Math.PI / 180.0) * Math.Cos(dLon);
-        var bearing = Math.Atan2(y, x) * R2D;
-        return bearing < 0 ? bearing + 360.0 : bearing;
     }
 
     #endregion

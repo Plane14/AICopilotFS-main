@@ -164,7 +164,7 @@ public sealed class HybridAutopilot
         // Bank control (target heading)
         if (targets.TargetHeading.HasValue)
         {
-            var headingError = NormalizeHeading(targets.TargetHeading.Value - state.Heading);
+            var headingError = Geo.NormalizeDegrees(targets.TargetHeading.Value - state.Heading);
             // A lower bank ceiling in turbulence keeps the aircraft from working the
             // ailerons against every gust; the scaling softens the response further.
             var maxBank = targets.MaxBankDeg ?? 25;
@@ -234,8 +234,11 @@ public sealed class HybridAutopilot
         _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(ThrottleCommand * 16384), 0, 16384));
     }
 
-    /// <summary>Flap handle index as a whole number, for a configuration limit lookup.</summary>
-    private static int FlapIndex(AircraftState s) => (int)Math.Round(s.FlapsHandleIndex);
+    /// <summary>
+    /// Flap handle index as a whole number, for a configuration limit lookup.
+    /// Shared with <see cref="AIPilot.FlapIndex"/> so there is one definition of this trivial conversion.
+    /// </summary>
+    private static int FlapIndex(AircraftState s) => AIPilot.FlapIndex(s);
 
     private static double PitchForVerticalSpeed(double targetVs, double groundSpeedKt)
     {
@@ -245,13 +248,6 @@ public sealed class HybridAutopilot
         var gsFps = groundSpeedKt * 1.68781;
         var climbAngle = Math.Atan2(fpmToFps, gsFps);
         return climbAngle * 180.0 / Math.PI;
-    }
-
-    private static double NormalizeHeading(double deg)
-    {
-        while (deg > 180) deg -= 360;
-        while (deg < -180) deg += 360;
-        return deg;
     }
 
     #endregion
