@@ -134,16 +134,14 @@ public sealed class AircraftController
         foreach (var line in content.Split('\n'))
         {
             var trimmed = line.Trim();
-            if (!trimmed.StartsWith("title", StringComparison.OrdinalIgnoreCase)) continue;
-
             var eqIdx = trimmed.IndexOf('=');
-            if (eqIdx >= 0)
-            {
-                var value = trimmed.Substring(eqIdx + 1).Trim();
-                if (value.StartsWith("\"") && value.EndsWith("\"") && value.Length >= 2)
-                    value = value[1..^1];
-                title = value;
-            }
+            if (eqIdx < 0) continue;
+            var key = trimmed.Substring(0, eqIdx).Trim();
+            if (!key.Equals("title", StringComparison.OrdinalIgnoreCase)) continue;
+            var value = trimmed.Substring(eqIdx + 1).Trim();
+            if (value.StartsWith("\"") && value.EndsWith("\"") && value.Length >= 2)
+                value = value[1..^1];
+            title = value;
         }
         return title;
     }
@@ -485,8 +483,8 @@ public sealed class AircraftController
                     break;
             case "ENGINES":
                 {
-                    _state.EngineCount = (int)Math.Round(D(0));
-                    int count = Math.Max(1, _state.EngineCount);
+                    _state.EngineCount = Math.Max(1, (int)Math.Round(D(0)));
+                    int count = Math.Min(MaxEngines, Math.Max(1, _state.EngineCount));
 
                     // 6 datums per engine after the leading engine count: the first is
                     // GENERAL ENG COMBUSTION (the type-independent "is it running" flag),
@@ -529,7 +527,7 @@ public sealed class AircraftController
                         // twin reported only engine 1's EGT and RPM, so an engine-2
                         // exceedance was invisible to EnvelopeGuard.
                         var ownCount = (int)Math.Round(D(0));
-                        var count = Math.Max(1, ownCount > 0 ? ownCount : _state.EngineCount);
+                        var count = Math.Min(MaxEngines, Math.Max(1, ownCount > 0 ? ownCount : _state.EngineCount));
                         var egt = new double[count];
                         var maxRpm = new double[count];
 
@@ -587,6 +585,7 @@ public sealed class AircraftController
                     _state.GearDown = D(1) > 0.5;
                     _state.ParkingBrakeSet = D(3) > 0.5;
                     _state.FlapsHandleIndex = D(4);
+                    _state.FlapsPosition = D(6);
                     // The aircraft's own limit indications. The barber pole is the
                     // never-exceed needle this airframe is displaying, which is the one
                     // speed limit that already accounts for Mach, configuration and
@@ -738,6 +737,7 @@ public sealed class AircraftController
                 atc.StationIdent = OrNull(7);
                 atc.StationType = OrNull(8);
                 atc.NativeStateUtc = DateTime.UtcNow;
+                _state.Timestamp = DateTime.UtcNow;
             }
         }
     }

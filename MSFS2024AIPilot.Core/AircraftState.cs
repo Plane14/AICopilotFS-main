@@ -76,7 +76,7 @@ public sealed class AircraftState
     /// </summary>
     public bool ParkingBrakeSet { get; set; }
 
-    public double FlapsPosition { get; set; } // 0-1
+    public double FlapsPosition { get; set; } // degrees, trailing edge flaps left angle
     public double FlapsHandleIndex { get; set; }
     public double ThrottlePosition { get; set; } // 0-1 per engine
     public double[] EngineN1 { get; set; } = [];
