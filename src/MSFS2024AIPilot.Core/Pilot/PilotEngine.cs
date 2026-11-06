@@ -15,6 +15,7 @@ using MSFS2024AIPilot.Core.Paths;
 using MSFS2024AIPilot.Core.Planning;
 using MSFS2024AIPilot.Core.SimConnect;
 using MSFS2024AIPilot.Core.State;
+using MSFS2024AIPilot.Core.Traffic;
 
 namespace MSFS2024AIPilot.Core.Pilot;
 
@@ -46,6 +47,8 @@ public sealed class PilotStatus
     public string CurrentChecklistItem { get; set; } = "";
     public string ChecklistPhaseName { get; set; } = "";
     public double ChecklistProgress { get; set; }
+    public string TrafficSummary { get; set; } = "";
+    public int TrafficContacts { get; set; }
     public string LastError { get; set; } = "";
 }
 
@@ -69,6 +72,10 @@ public sealed class PilotEngine : IDisposable
     private readonly TurbulenceTracker _turbulence = new();
     private readonly OperatingLimits _limits = new();
     private readonly EnvelopeGuard _envelope;
+    private readonly TrafficMonitor _traffic;
+    private TrafficAssessment _trafficAssessment = new();
+    private DateTime _lastTrafficLogUtc = DateTime.MinValue;
+    private bool _goAroundForTraffic;
 
     private readonly object _lock = new();
     private PilotStatus _status = new();
@@ -108,6 +115,8 @@ public sealed class PilotEngine : IDisposable
         _atcRadio = new AtcRadio(_aircraft.SimConnect);
         _checklists = new ChecklistManager(null);
         _envelope = new EnvelopeGuard(_limits);
+        _traffic = new TrafficMonitor(_aircraft.SimConnect, log: Log);
+        _aircraft.SimConnect.OnDataReceived += _traffic.OnData;
 
         _aircraft.OnStateUpdated += OnStateUpdated;
         _aircraft.OnAircraftTitleChanged += OnTitleChanged;
@@ -162,6 +171,7 @@ public sealed class PilotEngine : IDisposable
         _route.Waypoints.AddRange(wps);
         _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
         _nav.Reset();
+        _goAroundForTraffic = false;
 
         lock (_lock)
         {
@@ -289,6 +299,12 @@ public sealed class PilotEngine : IDisposable
         var s = _aircraft.GetSnapshot();
         _turbulence.Update(s.GLoad, dt, quiet: s.OnGround);
         var turbulence = _turbulence.Level;
+
+        // Traffic awareness: refresh the object-type request and assess the
+        // runway this phase cares about (departure on the ground, arrival on final).
+        _traffic.Refresh();
+        _trafficAssessment = _traffic.Assess(s, TrafficRunwayFor(s));
+        PublishTrafficStatus();
 
         // Feed weather/turbulence into envelope limits.
         _limits.MaxAirspeedKt = s.BarberPoleKt > 0 ? s.BarberPoleKt : 0;
@@ -716,7 +732,7 @@ public sealed class PilotEngine : IDisposable
             if (!s.Atc.DepartureAirportIsTowered || s.Atc.ClearedTakeoff)
             {
                 _takeoffClearanceRequested = false;
-                LineUpAndTakeoff(s, t);
+                if (TrafficAllowsRunwayEntry()) LineUpAndTakeoff(s, t);
             }
             return;
         }
@@ -743,6 +759,50 @@ public sealed class PilotEngine : IDisposable
         }
 
         if (dist < 12) { _taxiLegIndex++; return; }
+    }
+
+    /// <summary>The runway the current phase is using, for traffic assessment.</summary>
+    private RunwayInfo? TrafficRunwayFor(AircraftState s)
+    {
+        var phase = Status.Phase;
+        if (phase is FlightPhase.TaxiOut or FlightPhase.Takeoff or FlightPhase.InitialClimb
+            or FlightPhase.Climb or FlightPhase.Cruise or FlightPhase.Descent)
+        {
+            return _departureRunwayName is not null && _departureAirport is not null
+                ? _departureAirport.FindRunway(_departureRunwayName) : null;
+        }
+        if (phase is FlightPhase.Approach or FlightPhase.FinalApproach or FlightPhase.Rollout)
+        {
+            return _arrivalRunwayName is not null && _destinationAirport is not null
+                ? _destinationAirport.FindRunway(_arrivalRunwayName) : null;
+        }
+        return null;
+    }
+
+    private void PublishTrafficStatus()
+    {
+        var a = _trafficAssessment;
+        lock (_lock)
+        {
+            _status.TrafficSummary = a.Contacts.Count == 0 ? "" : a.Describe();
+            _status.TrafficContacts = a.Contacts.Count;
+        }
+    }
+
+    /// <summary>
+    /// True when no observed traffic makes entering the runway unsafe. Holds at the
+    /// hold-short while occupied; the assessment only ever says "unsafe", never guesses.
+    /// </summary>
+    private bool TrafficAllowsRunwayEntry()
+    {
+        var a = _trafficAssessment;
+        if (!a.RunwayEntryUnsafe) return true;
+        if (DateTime.UtcNow - _lastTrafficLogUtc > TimeSpan.FromSeconds(15))
+        {
+            _lastTrafficLogUtc = DateTime.UtcNow;
+            Log($"[Traffic] holding: {a.Describe()}");
+        }
+        return false;
     }
 
     private bool _pushbackDone;
@@ -824,6 +884,7 @@ public sealed class PilotEngine : IDisposable
                 }
             }
         }
+        if (!TrafficAllowsRunwayEntry()) return;
         SetPhase(FlightPhase.Takeoff);
         _ap.ParkingBrake(false);
         _takeoffClearanceRequested = false;
@@ -982,6 +1043,18 @@ public sealed class PilotEngine : IDisposable
               + WeatherModel.ApproachTurbulenceIncrementKt(turbulence);
         t.TargetAirspeedKt = vapp;
 
+        // Another aircraft on the runway or ahead on final: go around once per
+        // approach rather than land through occupied airspace.
+        var ta = _trafficAssessment;
+        if (!_goAroundForTraffic &&
+            (ta.DepartureRunwayOccupant is not null || ta.ArrivalOnDepartureRunway is not null))
+        {
+            _goAroundForTraffic = true;
+            Log($"[Traffic] go-around: {ta.Describe()}");
+            SetPhase(FlightPhase.GoAround);
+            return;
+        }
+
         // Glidepath: ~3° to the threshold.
         if (threshold is not null)
         {
@@ -1003,6 +1076,14 @@ public sealed class PilotEngine : IDisposable
     {
         _ap.SetDirectMode(false);
         _ap.ApMaster(true);
+        // Fly the published missed approach first when the route carries one.
+        var map = _route?.MissedApproachFix;
+        if (map is not null && s.AltitudeAGL < 3000)
+        {
+            var mapDist = GeoMath.DistanceNm(s.Latitude, s.Longitude, map.Latitude, map.Longitude);
+            if (mapDist > 1.0)
+                t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, map.Latitude, map.Longitude);
+        }
         t.TargetAltitudeFt = _targetCruiseAltitudeFt;
         t.TargetAirspeedKt = _performance.ClimbSpeed > 0 ? _performance.ClimbSpeed : 90;
         if (!s.GearDown) t.GearDown = true;
@@ -1111,6 +1192,7 @@ public sealed class PilotEngine : IDisposable
         };
         _route = RouteBuilder.Build(req);
         _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
+        _goAroundForTraffic = false;
         _nav.Reset();
 
         // Load the route into the sim's own flight plan so the GPS follows it.
@@ -1310,6 +1392,8 @@ public sealed class PilotEngine : IDisposable
                     ? c.Items[c.CurrentIndex].Text : "",
                 ChecklistPhaseName = _checklists.Current?.Title ?? _checklists.CurrentPhase.ToString(),
                 ChecklistProgress = _checklists.Current?.Progress ?? 0,
+                TrafficSummary = _status.TrafficSummary,
+                TrafficContacts = _status.TrafficContacts,
                 LastError = _status.LastError,
             };
         }
@@ -1321,6 +1405,8 @@ public sealed class PilotEngine : IDisposable
         _loopCts?.Cancel();
         try { _loopTask?.Wait(2000); } catch { }
         Disengage();
+        _aircraft.SimConnect.OnDataReceived -= _traffic.OnData;
+        _traffic.Dispose();
         _facilities.Dispose();
         _aircraft.Dispose();
     }

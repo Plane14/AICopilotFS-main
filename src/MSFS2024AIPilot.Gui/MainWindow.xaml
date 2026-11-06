@@ -139,6 +139,12 @@
                                 <StackPanel><TextBlock Text="AP" FontSize="10" Foreground="{StaticResource DimBrush}"/><TextBlock x:Name="TelAp" Text="—" FontSize="13"/></StackPanel>
                                 <StackPanel><TextBlock Text="ICE" FontSize="10" Foreground="{StaticResource DimBrush}"/><TextBlock x:Name="TelIce" Text="—" FontSize="13"/></StackPanel>
                             </UniformGrid>
+                            <UniformGrid Columns="6" Margin="0,10,0,0">
+                                <StackPanel Grid.ColumnSpan="6">
+                                    <TextBlock Text="TRAFFIC" FontSize="10" Foreground="{StaticResource DimBrush}"/>
+                                    <TextBlock x:Name="TelTraffic" Text="—" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </UniformGrid>
                         </StackPanel>
                     </Border>
                 </Grid>

@@ -108,6 +108,7 @@ public partial class MainWindow : Window
         TxtChecklistPhase.Text = s.ChecklistPhaseName;
         TxtChecklistItem.Text = s.CurrentChecklistItem;
         BarChecklist.Value = s.ChecklistProgress;
+        ApplyTraffic(s);
         if (s.ServiceMinutesRemaining > 0)
             TxtStatus.Text = $"Servicing — {s.ServiceMinutesRemaining} min remaining";
     }
@@ -128,6 +129,14 @@ public partial class MainWindow : Window
         TelFlaps.Text = $"{s.FlapsHandleIndex:F0}";
         TelAp.Text = s.Autopilot.MasterSwitch ? "ON" : "off";
         TelIce.Text = s.StructuralIcePercent > 1 ? $"{s.StructuralIcePercent:F0}%" : "—";
+    }
+
+    private void ApplyTraffic(PilotStatus s)
+    {
+        TelTraffic.Text = s.TrafficContacts > 0 ? s.TrafficSummary : "—";
+        TelTraffic.Foreground = s.TrafficSummary.Contains("occupied") || s.TrafficSummary.Contains("conflict")
+            ? FindResource("WarnBrush") as System.Windows.Media.Brush
+            : FindResource("DimBrush") as System.Windows.Media.Brush;
     }
 
     private static string Compass(double deg)
