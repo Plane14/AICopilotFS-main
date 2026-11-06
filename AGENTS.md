@@ -44,6 +44,8 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | Route builder | `Planning/RouteBuilder.cs` | Departure → enroute → final-approach-fix → threshold route generation |
 | Continuous planner | `Planning/ContinuousFlightPlanner.cs` | Random suitable destination inside aircraft range via the facility list |
 | Native ATC | `Core/Atc/NativeAtc.cs` | `AtcRequestEngine` (menu probing + SimVar grant detection), `AtcRadio` (COM tuning, squawk, handoffs) |
+| ATC screen capture | `Core/Atc/AtcScreenCapture.cs`, `Core/Atc/AtcMenuScreenReader.cs` | GDI capture of the simulator window + template-matched menu-line recognition; recognised lines are tried before learned/sequential probing |
+| Traffic monitor | `Core/Traffic/TrafficMonitor.cs` | `SimConnect_RequestDataOnSimObjectType` aircraft feed, stale-contact expiry, runway occupancy / on-final / airborne-conflict assessment; gates hold-short entry and triggers go-around |
 | Checklists | `Core/Checklists/Checklists.cs` | MSFS `SimBase.Document` checklist XML + generic fallbacks + event/simvar bindings |
 | Orchestrator | `Core/Pilot/PilotEngine.cs` | Connection loop, phase state machine, phase executors, turnaround/continuous logic |
 | GUI | `src/MSFS2024AIPilot.Gui` | Connect, mode select (Off / Single / Continuous), service time, engage/pause/disengage, telemetry, checklist, log |
@@ -84,7 +86,10 @@ and loads it via `SimConnect_FlightPlanLoad`, then repeats until disengaged.
 - Facility payloads are order-sensitive and nest (`OPEN AIRPORT` → child records
   → matching close); `FacilityLoader` decodes them into `AirportData`.
 - ATC clearances are read from `ATC …` SimVars; requests go through
-  `ATC_MENU_OPEN` + `ATC_MENU_0..9` probing with per-circumstance memory.
+  `ATC_MENU_OPEN` + `ATC_MENU_0..9` probing with per-circumstance memory. The
+  open menu is also captured off the screen (`AtcScreenCapture` +
+  `AtcMenuScreenReader`) so recognised request lines are pressed first; the
+  tenth displayed line maps to `ATC_MENU_0`.
 - `SimConnect_FlightPlanLoad` loads generated `.pln` files for the sim's GPS.
 
 ## Build & test
