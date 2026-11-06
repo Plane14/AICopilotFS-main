@@ -1,0 +1,15 @@
+<Application x:Class="MSFS2024AIPilot.Gui.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <SolidColorBrush x:Key="BgBrush" Color="#FF14171C"/>
+        <SolidColorBrush x:Key="PanelBrush" Color="#FF1E232B"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="#FF3D8BFD"/>
+        <SolidColorBrush x:Key="TextBrush" Color="#FFE8ECF1"/>
+        <SolidColorBrush x:Key="DimBrush" Color="#FF9AA4B2"/>
+        <SolidColorBrush x:Key="GoodBrush" Color="#FF3FB96B"/>
+        <SolidColorBrush x:Key="WarnBrush" Color="#FFE0A83C"/>
+        <SolidColorBrush x:Key="BadBrush" Color="#FFE05C5C"/>
+    </Application.Resources>
+</Application>
