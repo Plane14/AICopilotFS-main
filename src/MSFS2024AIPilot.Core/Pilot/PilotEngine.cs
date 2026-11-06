@@ -63,6 +63,8 @@ public sealed class PilotEngine : IDisposable
     private readonly NavPathFollower _nav = new();
     private readonly AtcRequestEngine _atcRequests;
     private readonly AtcRadio _atcRadio;
+    private readonly IGlyphRenderer _glyphRenderer = new GdiGlyphRenderer();
+    private readonly Dictionary<AtcRequestKind, AtcMenuReader> _menuReaders = new();
     private readonly ChecklistManager _checklists;
     private readonly TurbulenceTracker _turbulence = new();
     private readonly OperatingLimits _limits = new();
@@ -601,7 +603,7 @@ public sealed class PilotEngine : IDisposable
                 return;
             }
             // Request IFR clearance / flight following before taxi.
-            _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight");
+            _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight", MenuLinesFor(AtcRequestKind.IfreClearance));
             SetPhase(FlightPhase.TaxiOut);
             BeginTaxiOut(s);
         }
@@ -693,7 +695,7 @@ public sealed class PilotEngine : IDisposable
         // Wait for taxi clearance if the airport is towered.
         if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTaxi && !_taxiClearanceRequested)
         {
-            _atcRequests.Request(AtcRequestKind.Taxi, "taxi-out");
+            _atcRequests.Request(AtcRequestKind.Taxi, "taxi-out", MenuLinesFor(AtcRequestKind.Taxi));
             _taxiClearanceRequested = true;
         }
 
@@ -708,7 +710,7 @@ public sealed class PilotEngine : IDisposable
             _ap.ParkingBrake(true);
             if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTakeoff && !_takeoffClearanceRequested)
             {
-                _atcRequests.Request(AtcRequestKind.Takeoff, "hold-short");
+                _atcRequests.Request(AtcRequestKind.Takeoff, "hold-short", MenuLinesFor(AtcRequestKind.Takeoff));
                 _takeoffClearanceRequested = true;
             }
             if (!s.Atc.DepartureAirportIsTowered || s.Atc.ClearedTakeoff)
@@ -756,7 +758,7 @@ public sealed class PilotEngine : IDisposable
             case PushbackDecision.Wait:
                 if (!_pushbackProgress.Requested)
                 {
-                    _atcRequests.Request(AtcRequestKind.Pushback, "pushback");
+                    _atcRequests.Request(AtcRequestKind.Pushback, "pushback", MenuLinesFor(AtcRequestKind.Pushback));
                     _pushbackProgress = _pushbackProgress with
                     {
                         Requested = true,
@@ -787,6 +789,22 @@ public sealed class PilotEngine : IDisposable
                 break;
         }
     }
+
+    /// <summary>
+    /// Supplies the menu lines the screen reader recognises for a request kind.
+    /// The reader captures the simulator window and template-matches the ATC
+    /// menu's candidate phrases; a reader is cached per kind because template
+    /// matching is comparatively expensive.
+    /// </summary>
+    private Func<IReadOnlyList<int>> MenuLinesFor(AtcRequestKind kind) => () =>
+    {
+        if (!_menuReaders.TryGetValue(kind, out var reader))
+        {
+            reader = new AtcMenuReader(_glyphRenderer, kind);
+            _menuReaders[kind] = reader;
+        }
+        return reader.LinesForRequest();
+    };
 
     private void LineUpAndTakeoff(AircraftState s, ControlTargets t)
     {
