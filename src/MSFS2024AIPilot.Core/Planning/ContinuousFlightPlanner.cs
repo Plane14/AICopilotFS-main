@@ -20,6 +20,10 @@ public sealed class ContinuousFlightPlanner
     private readonly Dictionary<string, AirportData> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (double lat, double lon, double altM)> _positions = new(StringComparer.OrdinalIgnoreCase);
     private List<string> _airportIcaos = new();
+    // O(1) dedup for the list feed — a List.Contains scan per item is O(n²)
+    // over ~15k airports and stalls the SimConnect dispatch pump for tens of
+    // seconds while the list arrives in chunks.
+    private readonly HashSet<string> _airportIcaoSet = new(StringComparer.OrdinalIgnoreCase);
     private uint _listRequestId;
     private readonly object _lock = new();
     private readonly TaskCompletionSource<bool> _listReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -61,7 +65,7 @@ public sealed class ContinuousFlightPlanner
         if (requestId != _listRequestId) return;
         lock (_lock)
         {
-            if (!_airportIcaos.Contains(icao, StringComparer.OrdinalIgnoreCase))
+            if (_airportIcaoSet.Add(icao))
                 _airportIcaos.Add(icao);
             _positions[icao] = (lat, lon, altM);
         }

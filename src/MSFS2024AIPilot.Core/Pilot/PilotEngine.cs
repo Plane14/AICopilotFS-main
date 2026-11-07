@@ -351,9 +351,11 @@ public sealed class PilotEngine : IDisposable
         {
             try
             {
+                _tickStage = "dispatch";
                 _aircraft.Dispatch();
                 var now = DateTime.UtcNow;
                 _lastLoopHeartbeatUtc = now;
+                _tickStage = "tick";
                 var dt = Math.Clamp((now - last).TotalSeconds, 0.01, 0.5);
                 last = now;
                 Tick(dt, now);
@@ -387,9 +389,11 @@ public sealed class PilotEngine : IDisposable
 
         // Traffic awareness: refresh the object-type request and assess the
         // runway this phase cares about (departure on the ground, arrival on final).
-        _tickStage = "traffic";
+        _tickStage = "traffic-refresh";
         _traffic.Refresh();
+        _tickStage = "traffic-assess";
         _trafficAssessment = _traffic.Assess(s, TrafficRunwayFor(s));
+        _tickStage = "traffic-publish";
         PublishTrafficStatus();
 
         // Runtime amphibian detection: the sim reports IS GEAR FLOATS once an
