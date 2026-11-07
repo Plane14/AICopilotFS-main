@@ -82,6 +82,7 @@ public sealed class TerrainProfile
                 pts.Add(GeoMath.DestinationNm(a.lat, a.lon, bearing, d));
             }
         }
+        if (pts.Count == 0) return pts;
         // Dedup points closer than ~0.5 NM (leg joins).
         var dedup = new List<(double lat, double lon)> { pts[0] };
         foreach (var p in pts.Skip(1))

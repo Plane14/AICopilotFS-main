@@ -184,6 +184,12 @@ public sealed class PilotEngine : IDisposable
             CruiseAltitudeFt = nav.CruiseAltitudeFt > 0 ? nav.CruiseAltitudeFt : ChooseCruiseAltitude(s),
         };
         _route.Waypoints.AddRange(wps);
+        // The plan names its own runways — the water/traffic helpers key off
+        // these fields, so they must be populated for loaded plans too.
+        _departureRunwayName = nav.DepartureRunway;
+        _arrivalRunwayName = nav.ArrivalRunway;
+        _racetrackActive = false;
+        _terrainRaiseLoggedFt = 0;
         await AnalyzeTerrainAsync(s, ct);
         _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
         _nav.Reset();
@@ -770,6 +776,15 @@ public sealed class PilotEngine : IDisposable
 
     private double _takeoffRunMeters(AircraftState s)
     {
+        // Water operations need far less runway than the land performance
+        // model demands — cap the requirement so short seaplane lanes qualify.
+        if (AircraftKindDetector.IsWaterKind(_aircraftKind))
+            return _aircraftKind == AircraftKind.Seaplane ? 500 : 600;
+        return TakeoffRunMetersLand(s);
+    }
+
+    private double TakeoffRunMetersLand(AircraftState s)
+    {
         // Required takeoff run including margin, from the performance model when
         // available, else a v²/2a estimate off the rotation speed.
         var weight = s.GrossWeight > 0 ? s.GrossWeight : _performance.MaxGrossWeight;
@@ -1077,7 +1092,11 @@ public sealed class PilotEngine : IDisposable
         // Active racetrack (valley departure / mountain arrival) takes over.
         if (_racetrackActive || ShouldEnterRacetrack(s))
         {
+            var wasActive = _racetrackActive;
             ExecuteRacetrack(s, t);
+            // Racetrack flew raw heading holds — re-arm the nav latch so the
+            // flight plan is re-engaged on the next enroute frame.
+            if (wasActive && !_racetrackActive) _ap.ResetNavLatches();
             return;
         }
 
@@ -1144,6 +1163,9 @@ public sealed class PilotEngine : IDisposable
     /// bearing, then transition to the takeoff climb. If the aircraft is
     /// already clear of the airport it lifts off in place.
     /// </summary>
+    private double _hoverTaxiAltFt;
+    private bool _hoverAltCaptured;
+
     private void ExecuteRotorcraftTaxiOut(AircraftState s, ControlTargets t)
     {
         var ap = _departureAirport;
@@ -1158,17 +1180,24 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
+        // Capture the hover altitude once — parking may sit well above the
+        // airport reference elevation, so field+30 could be below the aircraft.
+        if (!_hoverAltCaptured)
+        {
+            _hoverAltCaptured = true;
+            _hoverTaxiAltFt = Math.Max(s.Altitude + 40,
+                ap.ReferenceAltitudeMeters * GeoMath.FeetPerMeter + 30);
+        }
+
         var (targetLat, targetLon) = RotorcraftDeparturePoint(s);
         var distNm = GeoMath.DistanceNm(s.Latitude, s.Longitude, targetLat, targetLon);
-        var fieldElevFt = ap.ReferenceAltitudeMeters * GeoMath.FeetPerMeter;
 
         t.GearDown = false;
         t.FlapIndex = 0;
-        t.TargetAltitudeFt = fieldElevFt + 30;  // hover-taxi height
+        t.TargetAltitudeFt = _hoverTaxiAltFt;
         t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, targetLat, targetLon);
         t.TargetAirspeedKt = 25;
         t.ThrottleFraction = 0.4;
-        t.TargetVsFpm = s.AltitudeAGL < 15 ? 300 : null;
 
         // Arrived at the departure point (or close enough): go to climb-out.
         if (distNm < 0.15 || distFromField > 1.2)
@@ -1198,13 +1227,10 @@ public sealed class PilotEngine : IDisposable
         _ap.SetDirectMode(true);
         var transit = RotorcraftTransitAltitudeFt(s);
         t.TargetAltitudeFt = transit;
-        t.TargetVsFpm = s.AltitudeAGL < 60 ? 800 : null;
         t.TargetAirspeedKt = null; // hover climb — throttle fraction drives it
         t.ThrottleFraction = 0.75;
         t.TargetHeadingDeg = InitialHeadingTowardRoute(s);
         t.GearDown = false;
-        if (s.AltitudeAGL > 60) t.TargetVsFpm = null;
-        if (s.Altitude >= transit - 100) t.TargetVsFpm = 0;
     }
 
     private double? InitialHeadingTowardRoute(AircraftState s)
@@ -1227,22 +1253,21 @@ public sealed class PilotEngine : IDisposable
         var transit = _route?.CruiseAltitudeFt ?? RotorcraftTransitAltitudeFt(s);
         t.TargetAltitudeFt = transit;
 
-        // Terrain: rotorcraft keep ~800 ft above the highest ground ahead;
-        // when the climb can't keep up, slow to ~25 kt (aerotto-style).
+        // Terrain: rotorcraft keep ~800 ft above the highest ground ahead.
+        // Only when terrain pushes the target above transit do we check
+        // whether the climb can keep up — and slow to ~25 kt if it can't.
         var aheadNm = 8.0;
         var terrainReq = _terrainProfile?.RequiredAheadFt(s.Latitude, s.Longitude, aheadNm) ?? 0;
-        if (terrainReq > 0)
+        var need = terrainReq > 0 ? terrainReq + 300 : 0;
+        var climbingForTerrain = need > transit;
+        if (climbingForTerrain)
         {
-            var need = terrainReq + 300; // rotorcraft margin over the profile floor
-            if (need > t.TargetAltitudeFt)
+            if (need > _terrainRaiseLoggedFt + 200)
             {
-                if (need > _terrainRaiseLoggedFt + 200)
-                {
-                    _terrainRaiseLoggedFt = need;
-                    Log($"[Pilot] Terrain ahead requires {need:F0} ft — adjusting.");
-                }
-                t.TargetAltitudeFt = need;
+                _terrainRaiseLoggedFt = need;
+                Log($"[Pilot] Terrain ahead requires {need:F0} ft — adjusting.");
             }
+            t.TargetAltitudeFt = need;
             // Can the aircraft reach it? Estimate climb over the ahead window.
             var climbFpm = _performance.ClimbRateFpm > 0 ? _performance.ClimbRateFpm : 1200;
             var gs = Math.Max(s.GroundSpeed, 25);
@@ -1453,7 +1478,9 @@ public sealed class PilotEngine : IDisposable
         // Mountain arrival: hold a racetrack until terrain permits descent.
         if (_aircraftKind != AircraftKind.Rotorcraft && (_racetrackActive || ShouldEnterRacetrack(s)))
         {
+            var wasActive = _racetrackActive;
             ExecuteRacetrack(s, t);
+            if (wasActive && !_racetrackActive) _ap.ResetNavLatches();
             return;
         }
 
@@ -1757,6 +1784,7 @@ public sealed class PilotEngine : IDisposable
         _goAroundForTraffic = false;
         _racetrackActive = false;
         _terrainRaiseLoggedFt = 0;
+        _hoverAltCaptured = false;
         _nav.Reset();
 
         // Terrain analysis: sample elevations along the route, raise cruise and
@@ -1874,6 +1902,8 @@ public sealed class PilotEngine : IDisposable
 
     private double _landingRunMeters(AircraftState s)
     {
+        if (AircraftKindDetector.IsWaterKind(_aircraftKind))
+            return _aircraftKind == AircraftKind.Seaplane ? 500 : 600;
         var weight = s.GrossWeight > 0 ? s.GrossWeight : _performance.MaxLandingWeight;
         if (_performance.HasPerformanceData && weight > 0)
             return _performance.RequiredLandingRunwayFt(weight) * GeoMath.FeetPerMeter;
@@ -1937,6 +1967,9 @@ public sealed class PilotEngine : IDisposable
         _departureAirport = _destinationAirport;
         _destinationAirport = null;
         _route = null;
+        _terrainProfile = null;
+        _racetrackActive = false;
+        _hoverAltCaptured = false;
         _taxiRoute = null;
         _taxiInPlanned = false;
         _pushbackDone = false;
@@ -1997,10 +2030,6 @@ public sealed class PilotEngine : IDisposable
 
     private void OnStateUpdated(AircraftState s)
     {
-        lock (_lock)
-        {
-            _status.Phase = s.OnGround ? _status.Phase : _status.Phase;
-        }
         PublishStatusThrottled();
     }
 
