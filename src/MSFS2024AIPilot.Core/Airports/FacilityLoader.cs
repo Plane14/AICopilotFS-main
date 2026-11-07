@@ -78,7 +78,6 @@ public sealed class AirportFacilityLoader : IDisposable
         F("PRIMARY_CLOSED"); F("SECONDARY_CLOSED");
         F("PRIMARY_TAKEOFF"); F("PRIMARY_LANDING");
         F("SECONDARY_TAKEOFF"); F("SECONDARY_LANDING");
-        F("PRIMARY_THRESHOLD"); F("SECONDARY_THRESHOLD");
         F("CLOSE RUNWAY");
 
         // TAXI_NAME
@@ -233,8 +232,8 @@ public sealed class AirportFacilityLoader : IDisposable
             SecondaryTakeoff = r.ReadInt8() != 0,
             SecondaryLanding = r.ReadInt8() != 0,
         };
-        if (r.ReadInt8() != 0) rw.PrimaryThreshold = rw.PrimaryEnd;
-        if (r.ReadInt8() != 0) rw.SecondaryThreshold = rw.SecondaryEnd;
+        // PRIMARY/SECONDARY_THRESHOLD are child blocks in the facility API,
+        // not flat fields — thresholds are derived from runway geometry.
         req.Airport.Runways.Add(rw);
     }
 
