@@ -95,23 +95,24 @@ public static class RouteBuilder
         var thresholdAlt = (dstRunway?.AltitudeMeters ?? req.Destination.ReferenceAltitudeMeters) * GeoMath.FeetPerMeter;
 
         // --- Enroute: great-circle waypoints from departure to destination ---
-        var startLat = depThreshold?.lat ?? req.Departure.ReferenceLatitude;
-        var startLon = depThreshold?.lon ?? req.Departure.ReferenceLongitude;
+        // Start at the FAR threshold (depEnd): after takeoff the aircraft is
+        // already past the departure threshold, so beginning the leg there
+        // would put the first enroute waypoint behind it.
+        var startLat = depEnd?.lat ?? depThreshold?.lat ?? req.Departure.ReferenceLatitude;
+        var startLon = depEnd?.lon ?? depThreshold?.lon ?? req.Departure.ReferenceLongitude;
         var endLat = threshold?.lat ?? req.Destination.ReferenceLatitude;
-        var endLat2 = endLat;
         var endLon = threshold?.lon ?? req.Destination.ReferenceLongitude;
 
-        var totalNm = GeoMath.DistanceNm(startLat, startLon, endLat2, endLon);
+        var totalNm = GeoMath.DistanceNm(startLat, startLon, endLat, endLon);
         route.TotalDistanceNm = totalNm;
 
         // Enroute waypoint count: enough to keep GPS happy but not absurd.
         var count = Math.Clamp((int)Math.Ceiling(totalNm / 60), 1, 12);
-        var spacingNm = totalNm / (count + 1);
 
         for (int i = 1; i <= count; i++)
         {
             var frac = (double)i / (count + 1);
-            var (lat, lon) = GreatCirclePoint(startLat, startLon, endLat2, endLon, frac);
+            var (lat, lon) = GreatCirclePoint(startLat, startLon, endLat, endLon, frac);
             route.Waypoints.Add(new FlightPlanWaypoint
             {
                 Ident = $"RT{i}",
@@ -125,7 +126,7 @@ public static class RouteBuilder
         // --- Arrival: final approach fix ~5nm out on extended centreline ---
         if (threshold is not null && dstRunway is not null)
         {
-            var heading = dstRunway.HeadingDegTrue;
+            var heading = dstRunway.TravelHeadingDeg(req.DestinationRunway);
             // FAF is outbound from the threshold along the reciprocal of the landing heading.
             var fafBearing = GeoMath.NormalizeDeg(heading + 180);
             var (fafLat, fafLon) = GeoMath.DestinationNm(threshold.Value.lat, threshold.Value.lon, fafBearing, FinalLegNm);
@@ -176,7 +177,7 @@ public static class RouteBuilder
             {
                 Ident = req.Destination.Icao,
                 Type = WaypointType.Airport,
-                Latitude = endLat2,
+                Latitude = endLat,
                 Longitude = endLon,
                 Altitude = thresholdAlt,
             });

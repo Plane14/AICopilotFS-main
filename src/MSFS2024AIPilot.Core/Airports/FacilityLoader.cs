@@ -475,9 +475,13 @@ public sealed class AirportFacilityLoader : IDisposable
     private static RawTaxiParking? ResolveParkingByIndex(List<RawTaxiParking> list, int index)
     {
         if (list.Count == 0) return null;
+        // TAXI_PATH END stores the parking node's index — match it directly
+        // before guessing a list position.
+        var byIndex = list.FirstOrDefault(pk => pk.Index == index);
+        if (byIndex is not null) return byIndex;
         if (index >= 0 && index < list.Count) return list[index];
         if (index >= 1 && index <= list.Count) return list[index - 1];
-        return list.FirstOrDefault(pk => pk.Index == index);
+        return null;
     }
 private static GroundEdge MakeEdge(RawTaxiPath p, int from, int to, double length) => new()
     {

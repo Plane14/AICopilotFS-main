@@ -38,9 +38,13 @@ public static class WeatherModel
     /// </summary>
     public static (double headwindKt, double crosswindKt) WindComponents(double windFromDeg, double windKt, double courseDeg)
     {
-        var angle = Geo.GeoMath.AngleDelta(windFromDeg, courseDeg + 180); // wind vector direction
-        var head = windKt * Math.Cos(Geo.GeoMath.ToRad(angle));
-        var cross = windKt * Math.Sin(Geo.GeoMath.ToRad(angle));
+        // rel = angle from course to the direction the wind blows FROM.
+        // Headwind is maximised when the wind comes straight down the nose
+        // (rel = 0); crosswind is positive when it pushes from the right.
+        var rel = Geo.GeoMath.AngleDelta(windFromDeg, courseDeg);
+        var rad = Geo.GeoMath.ToRad(rel);
+        var head = windKt * Math.Cos(rad);
+        var cross = -windKt * Math.Sin(rad);
         return (head, cross);
     }
 
@@ -100,10 +104,11 @@ public static class WeatherModel
 
     public static double WindRunFactor(double headwindKt, double referenceKt)
     {
-        // headwind shortens, tailwind lengthens: factor = (V/(V+hw))^2 approx
-        var effective = referenceKt - headwindKt; // headwind positive reduces groundspeed needed
+        // headwind shortens, tailwind lengthens: roll distance scales with the
+        // square of the groundspeed at rotation, (V - headwind) / V.
+        var effective = referenceKt - headwindKt;
         if (effective < referenceKt * 0.5) effective = referenceKt * 0.5;
-        var ratio = referenceKt / effective;
+        var ratio = effective / referenceKt;
         return Math.Clamp(ratio * ratio, 0.6, 1.8);
     }
 

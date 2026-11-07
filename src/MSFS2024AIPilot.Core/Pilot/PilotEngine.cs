@@ -547,10 +547,17 @@ public sealed class PilotEngine : IDisposable
                 // Checklists advance through ExecutePhase; engines started -> Startup.
                 break;
 
+            // Airborne engage: the machine must never walk a ground sequence
+            // (taxi route, takeoff roll) while the aircraft is already flying.
             case FlightPhase.Startup:
-                break;
-
             case FlightPhase.TaxiOut:
+                if (!s.OnGround && s.AltitudeAGL > 500)
+                {
+                    Log("[Pilot] Airborne — skipping ground phases, continuing enroute.");
+                    SetPhase(s.Altitude >= (_route?.CruiseAltitudeFt ?? _targetCruiseAltitudeFt) - 200
+                        ? FlightPhase.Cruise : FlightPhase.Climb);
+                    _nav.Reset();
+                }
                 break;
 
             case FlightPhase.Takeoff:
@@ -998,8 +1005,10 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
-        // Pushback first if the stand offers it and it hasn't been done.
-        if (s.Pushback.Available && !s.Pushback.Attached && !_pushbackDone)
+        // Pushback first if the stand offers it and it hasn't been done. The
+        // tug may already be attached — keep driving the pushback state
+        // machine until the planner says the push is complete or failed.
+        if ((s.Pushback.Available || s.Pushback.Attached) && !_pushbackDone)
         {
             ExecutePushback(s, t, now);
             return;
@@ -1171,9 +1180,41 @@ public sealed class PilotEngine : IDisposable
     /// <summary>Whether the landing gear should be extended for the arrival.</summary>
     private bool ArrivalNeedsGear() => !ArrivalOnWater();
 
+    private (double lat, double lon)? _lastPushPos;
+    private DateTime _lastPushMoveUtc = DateTime.MinValue;
+
     private void ExecutePushback(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
+
+        // Feed observed tug state into the progress record — without this the
+        // planner can never see the attach or any movement, so towing always
+        // reads as "still settling" and a detached tug ends in GiveUp.
+        if (s.Pushback.Attached && !_pushbackProgress.SawTug)
+        {
+            _pushbackProgress = _pushbackProgress with
+            {
+                SawTug = true,
+                AttachedUtc = now,
+                AttachPoint = (s.Latitude, s.Longitude),
+                LastMovedUtc = now,
+            };
+        }
+        if (s.Pushback.Attached)
+        {
+            var moved = _lastPushPos is { } lp &&
+                GeoMath.DistanceMeters(lp.lat, lp.lon, s.Latitude, s.Longitude) > 0.5;
+            if (moved) _lastPushMoveUtc = now;
+            _lastPushPos = (s.Latitude, s.Longitude);
+            _pushbackProgress = _pushbackProgress with
+            {
+                SawTug = true,
+                LastMovedUtc = _lastPushMoveUtc == DateTime.MinValue ? now : _lastPushMoveUtc,
+                OffParking = !(s.Atc?.OnParkingSpot ?? false),
+            };
+        }
+        else _lastPushPos = null;
+
         var decision = PushbackPlanner.Decide(s, _pushbackProgress, utcNow: now);
         switch (decision)
         {
@@ -1197,18 +1238,23 @@ public sealed class PilotEngine : IDisposable
                 _ap.ParkingBrake(false);
                 break;
             case PushbackDecision.Dismiss:
+                if (!s.Pushback.Attached)
+                {
+                    // Tug released (or never attached after moving enough):
+                    // pushback is done — proceed to the taxi route.
+                    _pushbackDone = true;
+                    _ap.ParkingBrake(true);
+                    break;
+                }
                 if (!_pushbackDismissed)
                 {
                     _pushbackDismissed = true;
                     _pushbackDismissUtc = now;
                     _pushbackProgress = _pushbackProgress with { Requested = false };
-                    if (s.Pushback.Attached)
-                    {
-                        _aircraft.SimConnect.FireEvent("TUG_DISABLE");
-                        Log("[Pilot] Pushback complete; releasing tug.");
-                    }
+                    _aircraft.SimConnect.FireEvent("TUG_DISABLE");
+                    Log("[Pilot] Pushback complete; releasing tug.");
                 }
-                else if (s.Pushback.Attached)
+                else
                 {
                     // The tug ignored TUG_DISABLE — escalate like the previous
                     // pilot did instead of firing the event every tick.
@@ -1291,7 +1337,7 @@ public sealed class PilotEngine : IDisposable
         var vy = perf.ClimbSpeed > 0 ? perf.ClimbSpeed : Math.Max(vr * 1.1, 70);
 
         t.TargetHeadingDeg = _departureAirport is not null && _departureRunwayName is not null
-            ? _departureAirport.FindRunway(_departureRunwayName)?.HeadingDegTrue
+            ? _departureAirport.FindRunway(_departureRunwayName)?.TravelHeadingDeg(_departureRunwayName)
             : (double?)null;
         t.TargetAirspeedKt = vy;
         t.ThrottleFraction = 1.0;
@@ -1377,11 +1423,10 @@ public sealed class PilotEngine : IDisposable
         // higher altitude than the current target — climb early.
         ApplyTerrainClearance(s, t, aheadNm: 12);
 
-        // Gear: retract once comfortably airborne, re-extend on short final —
-        // but never for a water arrival (floatplanes/amphibians wheels-up).
-        if (!ArrivalNeedsGear()) t.GearDown = false;
-        else if (s.AltitudeAGL > 2500) t.GearDown = false;
-        else if (s.AltitudeAGL < 600) t.GearDown = true;
+        // Gear: retract once comfortably airborne; re-extension is handled by
+        // the descent/approach phases. Extending here re-cycled the gear every
+        // time the initial climb passed back through 600 ft AGL.
+        if (!ArrivalNeedsGear() || s.AltitudeAGL > 2500) t.GearDown = false;
     }
 
     // ----- Rotorcraft -----
@@ -1615,7 +1660,7 @@ public sealed class PilotEngine : IDisposable
         if (_departureAirport is null) return s.TrueHeading;
         if (_departureRunwayName is not null)
         {
-            var h = _departureAirport.FindRunway(_departureRunwayName)?.HeadingDegTrue;
+            var h = _departureAirport.FindRunway(_departureRunwayName)?.TravelHeadingDeg(_departureRunwayName);
             if (h is not null) return h.Value;
         }
         return _destinationAirport is not null
@@ -1629,7 +1674,7 @@ public sealed class PilotEngine : IDisposable
         if (_destinationAirport is null) return s.TrueHeading;
         if (_arrivalRunwayName is not null)
         {
-            var h = _destinationAirport.FindRunway(_arrivalRunwayName)?.HeadingDegTrue;
+            var h = _destinationAirport.FindRunway(_arrivalRunwayName)?.TravelHeadingDeg(_arrivalRunwayName);
             if (h is not null) return h.Value;
         }
         return _departureAirport is not null
@@ -1830,7 +1875,7 @@ public sealed class PilotEngine : IDisposable
         {
             // Fly the extended centreline to the threshold.
             var brg = rw is not null
-                ? rw.HeadingDegTrue
+                ? rw.TravelHeadingDeg(_arrivalRunwayName)
                 : GeoMath.BearingDeg(s.Latitude, s.Longitude, threshold.Value.Item1, threshold.Value.Item2);
             t.TargetHeadingDeg = brg;
         }
@@ -1838,7 +1883,7 @@ public sealed class PilotEngine : IDisposable
         var vapp = _performance.Vapp > 0 ? _performance.Vapp : (_performance.ApproachSpeed > 0 ? _performance.ApproachSpeed : 80);
         // Add wind/ice/turbulence increments.
         var (headwind, _) = WeatherModel.WindComponents(s.WindDirection, s.WindVelocity, t.TargetHeadingDeg ?? s.TrueHeading);
-        vapp += WeatherModel.ApproachWindIncrementKt(Math.Max(0, headwind))
+        vapp += WeatherModel.ApproachWindIncrementKt(headwind)
               + WeatherModel.ApproachIceIncrementKt(s.StructuralIcePercent)
               + WeatherModel.ApproachTurbulenceIncrementKt(turbulence);
         t.TargetAirspeedKt = vapp;
@@ -2217,10 +2262,17 @@ public sealed class PilotEngine : IDisposable
         // the fuel-flow model refines it downward when live fuel data exists.
         var cap = _performance.MaxRangeNm > 0 ? _performance.MaxRangeNm : _planner.MaxRangeNm;
         // Still-air range ≈ fuel weight / fuel flow * speed. Rough but serviceable.
-        if (s.EngineFF.Length == 0 || s.EngineFF.All(f => f <= 0)) return cap;
-        var ffTotal = s.EngineFF.Sum();
+        var ffTotal = s.EngineFF.Length > 0 ? s.EngineFF.Sum() : 0;
         var fuelLb = s.TotalFuelWeight > 0 ? s.TotalFuelWeight : _performance.MaxFuelWeight;
-        if (ffTotal <= 0 || fuelLb <= 0) return cap;
+        if (fuelLb <= 0) return cap;
+        if (ffTotal <= 0)
+        {
+            // Engines off (just landed / cold start): FF reads zero, so fall
+            // back to a conservative fraction of the published range rather
+            // than assuming full tanks.
+            var frac = _performance.MaxFuelWeight > 0 ? Math.Clamp(fuelLb / _performance.MaxFuelWeight, 0.15, 1.0) : 0.5;
+            return cap * frac;
+        }
         var hours = fuelLb / ffTotal * 0.85; // 85% usable
         var gs = Math.Max(s.GroundSpeed, cruiseSpeedKt());
         return Math.Min(hours * gs * 0.9, cap); // reserve

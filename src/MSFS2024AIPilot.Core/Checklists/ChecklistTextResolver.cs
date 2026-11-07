@@ -557,6 +557,8 @@ public static class ChecklistTextResolver
         if (canonExpect == "CLOSED") return true;
         if (canonExpect.Contains("CUT OFF") || canonExpect.Contains("CUTOFF")) return true;
         if (canonExpect == "IDLE CUT OFF") return true;
+        if (canonExpect.Contains("SWITCH OFF") || canonExpect.Contains("SWITCHED OFF") ||
+            canonExpect.Contains("TURN OFF") || canonExpect.Contains("TURNED OFF")) return true;
         return false;
     }
 
@@ -569,8 +571,12 @@ public static class ChecklistTextResolver
     private static bool ContainsWord(string haystack, string word)
     {
         var h = haystack.Trim();
-        if (string.Equals(h, word.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
-        if (h.StartsWith(word, StringComparison.OrdinalIgnoreCase) && word.TrimStart() == word) return true;
-        return h.Contains(" " + word.Trim() + " ", StringComparison.OrdinalIgnoreCase);
+        var w = word.Trim();
+        if (string.Equals(h, w, StringComparison.OrdinalIgnoreCase)) return true;
+        if (h.StartsWith(w, StringComparison.OrdinalIgnoreCase) &&
+            (h.Length == w.Length || !char.IsLetterOrDigit(h[w.Length]))) return true;
+        var needle = " " + w + " ";
+        if (h.Contains(needle, StringComparison.OrdinalIgnoreCase)) return true;
+        return h.EndsWith(" " + w, StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -152,15 +152,17 @@ public sealed class AircraftPerformance
 
     private double PhysicsTakeoffRollFt(double weightLbs)
     {
-        double accel;
+        double accelFtS2;
         if (MaxThrustPerEngine > 0 && Vs1 > 0)
         {
-            accel = Math.Max(0.05, (MaxThrustPerEngine * Math.Max(EngineCount, 1)) / Math.Max(weightLbs, 1) * 32.2 * 0.6);
-            var vr = Math.Max(RotationSpeed, Vs1 * 1.1) * Geo.GeoMath.KnotsToMps;
-            return vr * vr / (2 * accel) * Geo.GeoMath.FeetPerMeter;
+            accelFtS2 = Math.Max(0.05, (MaxThrustPerEngine * Math.Max(EngineCount, 1)) / Math.Max(weightLbs, 1) * 32.2 * 0.6);
         }
-        var v = Math.Max(RotationSpeed, Vs1 * 1.1);
-        return v * v / (2 * 4.0); // ~4 ft/s² conservative accel
+        else accelFtS2 = 4.0; // ~4 ft/s² conservative accel
+
+        // Work in ft/s throughout: accel is ft/s², rotation speed is knots.
+        var vrKt = Math.Max(RotationSpeed, Vs1 * 1.1);
+        var vrFtS = vrKt * Geo.GeoMath.KnotsToMps / Geo.GeoMath.MetersPerFoot;
+        return vrFtS * vrFtS / (2 * accelFtS2);
     }
 
     private double PhysicsLandingDistanceFt(double weightLbs)

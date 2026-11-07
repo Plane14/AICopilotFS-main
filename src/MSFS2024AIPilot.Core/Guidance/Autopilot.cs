@@ -77,6 +77,11 @@ public sealed class HybridAutopilot
     private bool _axesNeutralised;
     private double _lastSentPitch, _lastSentBank, _lastSentRudder, _lastSentThrottle = double.NaN;
     private bool _axesPrimed;
+    private bool _apMasterSent;
+    private bool _hdgHoldEngaged;
+
+    /// <summary>Within this distance of the altitude target, altitude hold takes over from VS.</summary>
+    private const double AltCaptureFt = 30;
 
     // Last values sent to the native autopilot (dedup — these are toggle events).
     private double? _lastHdg, _lastAlt, _lastVs, _lastIas, _lastThr;
@@ -101,7 +106,14 @@ public sealed class HybridAutopilot
 
     // ---------------- Native autopilot commands ----------------
 
-    public void ApMaster(bool on) => _sc.FireEvent("AP_MASTER", on ? (uint)1 : (uint)0);
+    public void ApMaster(bool on)
+    {
+        // AP_MASTER is a toggle — callers invoke this every control tick, so
+        // only transmit on an actual state change.
+        if (_apMasterSent == on) return;
+        _apMasterSent = on;
+        _sc.FireEvent("AP_MASTER", on ? (uint)1 : (uint)0);
+    }
     public void HeadingHold(double headingDeg)
     {
         _sc.FireEvent("HEADING_BUG_SET", (uint)Math.Round(Geo.GeoMath.NormalizeDeg(headingDeg)));
@@ -158,7 +170,7 @@ public sealed class HybridAutopilot
     }
 
     public void SetThrottleFraction(double fraction)
-        => _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(fraction * 16384), 0, 16384));
+        => _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(fraction * 16384), 0, 16383));
 
     // ---------------- Direct surface control ----------------
 
@@ -170,36 +182,72 @@ public sealed class HybridAutopilot
     {
         var t = _targets;
 
+        // Flaps/gear are mode-independent: precision and ground phases run in
+        // direct mode and must still be able to select them.
+        if (t.FlapIndex is { } fl && fl != _lastFlap) { SelectFlaps(fl); _lastFlap = fl; }
+        if (t.GearDown is { } g && g != _lastGear) { Gear(g); _lastGear = g; }
+
         if (!_directMode)
         {
-            // Native autopilot: push whatever targets the phase wants, but only
-            // when they change — these events toggle modes, so re-sending every
-            // frame would flicker the autopilot.
-            if (t.TargetHeadingDeg is { } hdg && !Near(_lastHdg, hdg)) { HeadingHold(hdg); _lastHdg = hdg; }
-            if (t.TargetAltitudeFt is { } alt && !Near(_lastAlt, alt)) { AltitudeHold(alt); _lastAlt = alt; }
-            if (t.TargetVsFpm is { } vs && t.TargetAltitudeFt is null && !Near(_lastVs, vs)) { VerticalSpeedHold(vs); _lastVs = vs; }
+            // Native autopilot: push whatever targets the phase wants. The
+            // *_VAR_SET events are plain value sets and safe to repeat, but
+            // the AP_PANEL_*_HOLD events TOGGLE modes — engaging them must be
+            // edge-triggered or a drifting heading would flicker the AP.
+            if (t.TargetHeadingDeg is { } hdg)
+            {
+                if (!Near(_lastHdg, hdg))
+                {
+                    _sc.FireEvent("HEADING_BUG_SET", (uint)Math.Round(Geo.GeoMath.NormalizeDeg(hdg)));
+                    _lastHdg = hdg;
+                }
+                if (!_hdgHoldEngaged) { _sc.FireEvent("AP_PANEL_HEADING_HOLD"); _hdgHoldEngaged = true; }
+            }
+            else { _hdgHoldEngaged = false; _lastHdg = null; }
+
+            // VS hold and altitude hold are mutually exclusive modes: while a
+            // VS target is commanded and we're more than ~30 ft from the
+            // altitude floor, fly the rate; close in and capture the altitude.
+            var wantVs = t.TargetVsFpm is { } vsN &&
+                (t.TargetAltitudeFt is not { } altFloor || Math.Abs(altFloor - s.Altitude) > AltCaptureFt);
+            if (wantVs && t.TargetVsFpm is { } vsActive)
+            {
+                if (!Near(_lastVs, vsActive)) { VerticalSpeedHold(vsActive); _lastVs = vsActive; }
+                _lastAlt = null; // force re-engage of ALT hold on capture
+            }
+            else if (t.TargetAltitudeFt is { } alt && !Near(_lastAlt, alt))
+            {
+                AltitudeHold(alt); _lastAlt = alt; _lastVs = null;
+            }
             if (t.TargetAirspeedKt is { } ias && !Near(_lastIas, ias)) { AirspeedHold(ias); _lastIas = ias; }
-            if (t.TrackLocalizer && !_lastApr) { ApproachHold(); _lastApr = true; }
-            if (t.TrackNav && !_lastNav) { NavHold(); _lastNav = true; }
+            if (t.TrackLocalizer && !_lastApr) ApproachHold();
+            if (t.TrackNav && !_lastNav) NavHold();
+            _lastApr = t.TrackLocalizer;
+            _lastNav = t.TrackNav;
             if (t.ThrottleFraction is { } thr && !Near(_lastThr, thr)) { SetThrottleFraction(thr); _lastThr = thr; }
-            if (t.FlapIndex is { } fl && fl != _lastFlap) { SelectFlaps(fl); _lastFlap = fl; }
-            if (t.GearDown is { } g && g != _lastGear) { Gear(g); _lastGear = g; }
             return;
         }
 
         // Direct mode: PID on surfaces.
-        double pitchCmd = 0, bankCmd = 0, rudderCmd = 0, throttle = t.ThrottleFraction ?? 0;
+        double pitchCmd = 0, bankCmd = 0, rudderCmd = 0;
+        // With no explicit throttle the speed loop trims around the last
+        // commanded value; starting from 0 would collapse the throttle to idle.
+        double throttle = t.ThrottleFraction
+            ?? (_lastSentThrottle is { } prev && !double.IsNaN(prev) ? prev : 0.45);
 
-        // Pitch: hold altitude or vertical speed.
-        if (t.TargetAltitudeFt is { } altT)
+        // Pitch: hold altitude or vertical speed. Same VS/altitude precedence
+        // as native mode — a commanded sink/climb rate wins until within
+        // AltCaptureFt of the altitude target.
+        var wantDirectVs = t.TargetVsFpm is { } vsT &&
+            (t.TargetAltitudeFt is not { } altT2 || Math.Abs(altT2 - s.Altitude) > AltCaptureFt);
+        if (t.TargetAltitudeFt is { } altT && !wantDirectVs)
         {
             var altErr = altT - s.Altitude;
             var vsCmd = Math.Clamp(altErr * 8.0, -FlightEnvelopeGuardMaxVs(s), FlightEnvelopeGuardMaxVs(s));
             pitchCmd = _pitch.Update(vsCmd - s.VerticalSpeed, dt) * t.ControlScale;
         }
-        else if (t.TargetVsFpm is { } vsT)
+        else if (t.TargetVsFpm is { } vsT2)
         {
-            pitchCmd = _pitch.Update(vsT - s.VerticalSpeed, dt) * 0.02 * t.ControlScale;
+            pitchCmd = _pitch.Update(vsT2 - s.VerticalSpeed, dt) * 0.02 * t.ControlScale;
         }
 
         // Bank: steer toward target heading.
@@ -300,7 +348,11 @@ public sealed class HybridAutopilot
             // Mode latches must be re-armed for the next leg: NAV/APR hold are
             // one-shot events, and without this a second flight never re-engages
             // approach or GPS navigation tracking.
+            // AP master was off in direct mode, which drops all holds —
+            // re-arm every mode latch so they engage again.
             _lastNav = _lastApr = false;
+            _hdgHoldEngaged = false;
+            _lastHdg = _lastAlt = _lastVs = _lastIas = null;
         }
     }
 }

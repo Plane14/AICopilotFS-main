@@ -156,11 +156,14 @@ public sealed class ChecklistManager
             return;
         }
 
-        // Keep only un-finished steps the current phase wants. Approach also
-        // runs the IFR variant when the base approach step has no items.
+        // The VFR/IFR approach variants are alternates of the base approach:
+        // they only run when the set has no base approach items at all, so a
+        // set carrying several variants does not queue them all.
+        var baseApproachHasItems = (_set.Find(ChecklistStep.LANDING_APPROACH)?.ExecutableCount ?? 0) > 0;
         var wanted = StepsFor(phase).Where(s =>
-            s is ChecklistStep.LANDING_APPROACH_IFR
-                ? !_completed.Contains(ChecklistStep.LANDING_APPROACH) && _set.Find(s)?.ExecutableCount > 0
+            s is ChecklistStep.LANDING_APPROACH_VFR or ChecklistStep.LANDING_APPROACH_IFR
+                ? !baseApproachHasItems && !_completed.Contains(s) &&
+                  (_set.Find(s)?.ExecutableCount ?? 0) > 0
                 : !_completed.Contains(s))
             .ToList();
 
@@ -168,6 +171,8 @@ public sealed class ChecklistManager
         {
             if (_queue.Count > 0) _queue.Clear();
             _index = 0;
+            _executablesDone = 0;
+            _activeTotal = 0;
             _activeStepName = "";
             return;
         }

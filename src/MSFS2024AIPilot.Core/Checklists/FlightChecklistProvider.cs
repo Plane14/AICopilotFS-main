@@ -84,7 +84,8 @@ public static class FlightChecklistProvider
             SaveCached(slug, bundle);
             return bundle;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException
+            or FormatException or OverflowException)
         {
             // Offline or site changed: fall through to the generic checklists.
         }
@@ -250,8 +251,20 @@ public static class FlightChecklistProvider
         var phasesJson = ExtractPhasesArray(stream);
         if (phasesJson is null) return null;
 
-        using var doc = JsonDocument.Parse(phasesJson);
-        var set = new AircraftChecklistSet { AircraftTitle = slug, Format = ChecklistSetFormat.WebJson };
+        AircraftChecklistSet? set;
+        try
+        {
+            using var doc = JsonDocument.Parse(phasesJson);
+            set = ParsePhasesDoc(doc);
+            if (set is not null) set.AircraftTitle = slug;
+        }
+        catch (JsonException) { return null; }
+        return set;
+    }
+
+    private static AircraftChecklistSet? ParsePhasesDoc(JsonDocument doc)
+    {
+        var set = new AircraftChecklistSet { AircraftTitle = "", Format = ChecklistSetFormat.WebJson };
         foreach (var phase in doc.RootElement.EnumerateArray())
         {
             if (phase.ValueKind != JsonValueKind.Object ||
@@ -267,8 +280,9 @@ public static class FlightChecklistProvider
 
             foreach (var st in steps.EnumerateArray())
             {
-                var action = st.TryGetProperty("action", out var a) ? a.GetString() ?? "" : "";
-                var expected = st.TryGetProperty("expected", out var e) ? e.GetString() ?? "" : "";
+                if (st.ValueKind != JsonValueKind.Object) continue;
+                var action = GetStr(st, "action") ?? "";
+                var expected = GetStr(st, "expected") ?? "";
                 if (action.Length == 0) continue;
                 list.Items.Add(ChecklistParser.BuildLegacyItem(action, expected, phaseName));
             }
@@ -295,14 +309,15 @@ public static class FlightChecklistProvider
     /// balanced JSON array text.
     private static string? ExtractPhasesArray(string stream)
     {
-        var key = stream.IndexOf("\"phases\":[", StringComparison.Ordinal);
-        if (key < 0) return null;
-        var start = stream.IndexOf('[', key);
-        if (start < 0) return null;
+        // Tolerate whitespace between the key and the array: "phases": [ ... ]
+        var keyIdx = stream.IndexOf("\"phases\"", StringComparison.Ordinal);
+        if (keyIdx < 0) return null;
+        var key = stream.IndexOf('[', keyIdx);
+        if (key < 0 || key - keyIdx > 32) return null;
 
         var depth = 0;
         var inString = false;
-        for (var i = start; i < stream.Length; i++)
+        for (var i = key; i < stream.Length; i++)
         {
             var c = stream[i];
             if (inString)
@@ -314,7 +329,7 @@ public static class FlightChecklistProvider
             if (c == '"') inString = true;
             else if (c == '[') depth++;
             else if (c == ']' && --depth == 0)
-                return stream.Substring(start, i - start + 1);
+                return stream.Substring(key, i - key + 1);
         }
         return null;
     }

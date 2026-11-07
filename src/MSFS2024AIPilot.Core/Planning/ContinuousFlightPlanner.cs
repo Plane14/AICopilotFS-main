@@ -95,7 +95,9 @@ public sealed class ContinuousFlightPlanner
     /// <summary>Loads an airport's facility data and waits for it (with timeout).</summary>
     public async Task<AirportData?> LoadAirportAsync(string icao, TimeSpan timeout, CancellationToken ct = default)
     {
-        if (_cache.TryGetValue(icao, out var cached)) return cached;
+        AirportData? cached;
+        lock (_lock) _cache.TryGetValue(icao, out cached);
+        if (cached is not null) return cached;
         var tcs = new TaskCompletionSource<AirportData>(TaskCreationOptions.RunContinuationsAsynchronously);
         uint requestId = 0;
         // Match on the facility request id, not the ICAO string — the payload
@@ -276,7 +278,7 @@ public sealed class ContinuousFlightPlanner
                 var threshold = rw.ThresholdFor(name);
                 if (threshold is null) continue;
                 // Prefer runways whose landing/takeoff heading has a headwind component.
-                var windAngle = GeoMath.AngleDelta(windDirectionDeg, rw.HeadingDegTrue);
+                var windAngle = GeoMath.AngleDelta(windDirectionDeg, rw.TravelHeadingDeg(name));
                 var score = rw.LengthMeters + waterBonus - Math.Abs(GeoMath.AngleDelta(windAngle, 0)) * 5;
                 if (score > bestScore)
                 {

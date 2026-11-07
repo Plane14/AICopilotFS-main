@@ -131,14 +131,14 @@ public sealed class SimConnectClient : IDisposable
             if (!_connected) return;
             try
             {
-                if (_handle != IntPtr.Zero) SimConnect_Close(ref _handle);
+                if (_handle != IntPtr.Zero) SimConnect_Close(_handle);
             }
             catch { }
             finally
             {
                 _handle = IntPtr.Zero;
                 _connected = false;
-                _stringDefinitions.Clear();
+                lock (_definitionDatums) _stringDefinitions.Clear();
             }
         }
     }
@@ -198,16 +198,16 @@ public sealed class SimConnectClient : IDisposable
 
     private static long _callbackTicks;
 
-    private static void OnRecvNative(IntPtr pData, IntPtr cbData, IntPtr pContext)
+    private static void OnRecvNative(IntPtr pData, uint cbData, IntPtr pContext)
     {
         var cbSw = System.Diagnostics.Stopwatch.StartNew();
         try { OnRecvNativeCore(pData, cbData, pContext); }
         finally { Interlocked.Add(ref _callbackTicks, cbSw.ElapsedTicks); }
     }
 
-    private static void OnRecvNativeCore(IntPtr pData, IntPtr cbData, IntPtr pContext)
+    private static void OnRecvNativeCore(IntPtr pData, uint cbData, IntPtr pContext)
     {
-        if (cbData == IntPtr.Zero || (int)cbData < Marshal.SizeOf<SIMCONNECT_RECV>()) return;
+        if (cbData < (uint)Marshal.SizeOf<SIMCONNECT_RECV>()) return;
 
         var client = ResolveClient(pContext);
         if (client == null) return;
@@ -235,6 +235,7 @@ public sealed class SimConnectClient : IDisposable
                 }
                 break;
             case SimConnectRecvId.SimObjectData:
+            case SimConnectRecvId.SimObjectDataByType:
                 if (available > SimConnectReceiveOffsets.SimObjectData)
                 {
                     var obj = Marshal.PtrToStructure<SIMCONNECT_RECV_SIMOBJECT_DATA>(pData);
@@ -317,7 +318,10 @@ public sealed class SimConnectClient : IDisposable
     {
         if (dataBytes <= 0) return;
 
-        if (_stringDefinitions.TryGetValue(header.dwDefineID, out var sizes))
+        int[]? sizes;
+        lock (_definitionDatums)
+            _stringDefinitions.TryGetValue(header.dwDefineID, out sizes);
+        if (sizes is not null)
         {
             OnStringDataReceived?.Invoke(new StringSimObjectData(
                 header.dwRequestID, header.dwDefineID, DecodeStrings(dataPtr, dataBytes, sizes)));
@@ -474,8 +478,10 @@ public sealed class SimConnectClient : IDisposable
                 SendNamed($"add string datum '{datums[i].Name}' to definition {defineId}",
                     () => SimConnect_AddToDataDefinition(_handle, defineId, datums[i].Name, "", (uint)datums[i].Size, 0, UnusedDatumId));
             }
+            // Register before any data can arrive so the pump thread never
+            // decodes this definition's payload as doubles.
+            _stringDefinitions[defineId] = sizes;
         }
-        _stringDefinitions[defineId] = sizes;
         return defineId;
     }
 
@@ -510,6 +516,7 @@ public sealed class SimConnectClient : IDisposable
     {
         if (defineId == 0 || _handle == IntPtr.Zero) return;
         SendNamed($"clear data definition {defineId}", () => SimConnect_ClearDataDefinition(_handle, defineId));
+        lock (_definitionDatums) _stringDefinitions.Remove(defineId);
     }
 
     public uint RequestData(uint defineId, uint objectId = 0, Period period = Period.Second, uint interval = 0, uint limit = 0)
@@ -519,12 +526,12 @@ public sealed class SimConnectClient : IDisposable
         {
             names = _definitionDatums.TryGetValue(defineId, out var list) ? string.Join(", ", list) : "(no datums recorded)";
         }
-        uint requestId = 0;
+        // Allocate the ID up front so a failed send still returns a unique,
+        // harmless request ID instead of 0 (which would collide in callers'
+        // request maps).
+        uint requestId = _nextRequestId++;
         SendNamed($"request data for definition {defineId} [{names}]", () =>
-        {
-            requestId = _nextRequestId++;
-            return SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit);
-        });
+            SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit));
         return requestId;
     }
 
@@ -565,6 +572,11 @@ public sealed class SimConnectClient : IDisposable
         var description = string.IsNullOrEmpty(name)
             ? $"transmit event id {eventId} (data={data})"
             : $"transmit event '{name}' (data={data})";
+        // With GroupIdIsPriority the GroupID parameter is a priority; 0 is below
+        // SIMCONNECT_GROUP_PRIORITY_LOWEST (4e9) and would be ignored. Substitute
+        // the SDK's default priority when no explicit one was given.
+        if ((flags & EventFlags.GroupIdIsPriority) != 0 && groupId == 0)
+            groupId = 2_000_000_000; // SIMCONNECT_GROUP_PRIORITY_DEFAULT
         SendNamed(description, () => SimConnect_TransmitClientEvent(_handle, objectId, eventId, data, groupId, (uint)flags));
     }
 
@@ -642,7 +654,7 @@ public sealed class SimConnectClient : IDisposable
         {
             var eventId = MapClientEventToSimEvent(actionName);
             if (args.Length > 0 && args[0] is double d)
-                TransmitClientEvent(eventId, data: (uint)d);
+                TransmitClientEvent(eventId, data: (uint)Math.Round(d));
             else if (args.Length > 0 && args[0] is uint u)
                 TransmitClientEvent(eventId, data: u);
             else
@@ -661,8 +673,10 @@ public sealed class SimConnectClient : IDisposable
         {
             ptr = Marshal.AllocHGlobal(data.Length);
             Marshal.Copy(data, 0, ptr, data.Length);
+            // cbUnitSize is the size of ONE element, not the whole buffer.
+            var unitSize = arrayCount > 0 ? (uint)(data.Length / arrayCount) : (uint)data.Length;
             SendNamed($"set data on sim object {objectId} (define {defineId})",
-                () => SimConnect_SetDataOnSimObject(_handle, defineId, objectId, 0, arrayCount, (uint)data.Length, ptr));
+                () => SimConnect_SetDataOnSimObject(_handle, defineId, objectId, 0, arrayCount, unitSize, ptr));
         }
         finally
         {
@@ -673,6 +687,7 @@ public sealed class SimConnectClient : IDisposable
     public void Dispose()
     {
         Disconnect();
+        if (NativeBridge.Client == this) NativeBridge.Client = null;
         _msgEvent.Dispose();
         if (_selfHandle.IsAllocated) _selfHandle.Free();
         GC.SuppressFinalize(this);
@@ -689,7 +704,7 @@ public sealed class SimConnectClient : IDisposable
     private static extern int SimConnect_Open(ref IntPtr phSimConnect, [MarshalAs(UnmanagedType.LPStr)] string szName, IntPtr hWnd, uint dwUserEvent, IntPtr hEvent, uint dwConfigIndex);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
-    private static extern void SimConnect_Close(ref IntPtr phSimConnect);
+    private static extern void SimConnect_Close(IntPtr hSimConnect);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
     private static extern int SimConnect_CallDispatch(IntPtr hSimConnect, SimConnectRecvDelegate pfnDispatch, IntPtr pContext);
@@ -1150,7 +1165,7 @@ internal static class SimConnectReceiveOffsets
     public const int AirportList = 28;
 }
 
-internal delegate void SimConnectRecvDelegate(IntPtr pData, IntPtr cbData, IntPtr pContext);
+internal delegate void SimConnectRecvDelegate(IntPtr pData, uint cbData, IntPtr pContext);
 
 internal static class NativeBridge
 {

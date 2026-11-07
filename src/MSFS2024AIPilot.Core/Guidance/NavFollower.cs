@@ -21,11 +21,12 @@ public sealed class NavPathFollower
     public double TurnAnticipationNm { get; set; } = 3.0;
 
     private int _activeIndex = -1;
+    private bool _hasCaptured;
 
     /// <summary>The waypoint index currently being flown to.</summary>
     public int ActiveIndex => _activeIndex;
 
-    public void Reset() => _activeIndex = -1;
+    public void Reset() { _activeIndex = -1; _hasCaptured = false; }
 
     /// <summary>
     /// Advances the waypoint sequence and returns the desired ground track and
@@ -43,6 +44,21 @@ public sealed class NavPathFollower
         if (_activeIndex < 0) _activeIndex = Math.Max(0, simIndex);
         if (_activeIndex >= wps.Count) _activeIndex = wps.Count - 1;
 
+        // Before the first capture, skip waypoints we have already passed:
+        // rotorcraft routes start at the departure airport reference point,
+        // which is ~1 NM astern once the hover climb-out transitions to
+        // enroute — without this the aircraft would be commanded back to it.
+        if (!_hasCaptured)
+        {
+            while (_activeIndex < wps.Count - 1 && wps[_activeIndex].HasPosition)
+            {
+                var wp = wps[_activeIndex];
+                var brgTo = GeoMath.BearingDeg(s.Latitude, s.Longitude, wp.Latitude, wp.Longitude);
+                if (Math.Abs(GeoMath.AngleDelta(brgTo, s.TrueHeading)) <= 100) break;
+                _activeIndex++;
+            }
+        }
+
         // Advance when close to the active waypoint.
         var target = wps[_activeIndex];
         if (target.HasPosition)
@@ -51,6 +67,7 @@ public sealed class NavPathFollower
             if (dist < CaptureRadiusNm && _activeIndex < wps.Count - 1)
             {
                 _activeIndex++;
+                _hasCaptured = true;
                 target = wps[_activeIndex];
             }
         }

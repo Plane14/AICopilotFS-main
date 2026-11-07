@@ -95,6 +95,10 @@ public sealed class SimAircraft : IDisposable
     public void Dispatch(int idleWaitMs = 0)
     {
         _sc.Dispatch(idleWaitMs);
+        // Only notify when a data handler actually mutated the state — the
+        // pump calls Dispatch ~20x/s even when the sim sent nothing, and each
+        // notification pays a full AircraftState.Clone().
+        if (Interlocked.Exchange(ref _stateDirty, 0) == 0) return;
         long version;
         lock (_stateLock)
         {
@@ -107,6 +111,8 @@ public sealed class SimAircraft : IDisposable
             OnStateUpdated?.Invoke(GetSnapshot());
         }
     }
+
+    private int _stateDirty;
 
     public AircraftState GetSnapshot()
     {
@@ -360,6 +366,7 @@ public sealed class SimAircraft : IDisposable
         var airPath = data.String;
         var dir = Path.GetDirectoryName(airPath);
         if (string.IsNullOrEmpty(dir)) return;
+        Interlocked.Exchange(ref _stateDirty, 1);
         // Resolution scans package roots and reads cfg files - too slow for
         // the dispatch pump, so it runs on a worker thread.
         QueueIdentityWork(() => UpdateAircraftIdentity(dir, _aircraftTitle));
@@ -386,6 +393,8 @@ public sealed class SimAircraft : IDisposable
 
     private void OnStringDataReceived(StringSimObjectData data)
     {
+        if (data.DefineId != _titleDefineId && data.DefineId != _atcTextDefineId) return;
+        Interlocked.Exchange(ref _stateDirty, 1);
         string S(int i) => i < data.Values.Length ? data.Values[i] : "";
         string? OrNull(int i)
         {
@@ -479,6 +488,7 @@ public sealed class SimAircraft : IDisposable
                 eventTitle = resolvedTitle;
             }
         }
+        if (eventDir != null || eventTitle != null) Interlocked.Exchange(ref _stateDirty, 1);
         // Events fire outside the lock: subscribers do file IO and must not
         // stall GetSnapshot callers.
         if (eventDir != null) OnAircraftDirectoryChanged?.Invoke(eventDir);
@@ -511,6 +521,7 @@ public sealed class SimAircraft : IDisposable
     private void OnDataReceived(SimObjectData data)
     {
         if (!_requestMap.TryGetValue(data.RequestId, out var block)) return;
+        Interlocked.Exchange(ref _stateDirty, 1);
         var v = data.Values;
         double D(int i) => i < v.Length && v[i] is double d ? d : 0;
 
@@ -688,7 +699,7 @@ public sealed class SimAircraft : IDisposable
 
     private static string FormatFrequency(double mhz)
     {
-        var asInt = (uint)(mhz * 1000);
+        var asInt = (uint)Math.Round(mhz * 1000);
         return $"{asInt / 1000}.{asInt % 1000:D3}";
     }
 

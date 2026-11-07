@@ -42,6 +42,7 @@ public static class GenericChecklists
         else Text(set, ChecklistStep.PREFLIGHT_GATE, "MIXTURE", "IDLE CUT-OFF");
         foreach (var engineStart in EngineStart(engineCount, turbine))
             Add(set, ChecklistStep.PREFLIGHT_GATE, engineStart);
+        if (!turbine) Text(set, ChecklistStep.PREFLIGHT_GATE, "MIXTURE", "RICH");
         Text(set, ChecklistStep.PREFLIGHT_GATE, "GENERATOR", "ON");
         Text(set, ChecklistStep.PREFLIGHT_GATE, "PITOT HEAT", "AS REQUIRED");
 
@@ -50,6 +51,7 @@ public static class GenericChecklists
         Text(set, ChecklistStep.PREFLIGHT_TAXI_OUT, "BEACON", "ON");
         Text(set, ChecklistStep.PREFLIGHT_TAXI_OUT, "FLAPS", "UP");
         Text(set, ChecklistStep.PREFLIGHT_TAXI_OUT, "TRANSPONDER", "SET");
+        Text(set, ChecklistStep.PREFLIGHT_TAXI_OUT, "PARKING BRAKE", "RELEASE");
 
         // ---------------- FLIGHT_RUNWAY ----------------
         Text(set, ChecklistStep.FLIGHT_RUNWAY, "STROBES", "ON");

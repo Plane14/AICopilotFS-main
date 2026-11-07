@@ -64,6 +64,9 @@ public static class ChecklistParser
             return set;
         }
 
+        // The include root must be set before the parse loop — includes resolve
+        // against it while files are being parsed.
+        set.SourcePath = dir;
         var loc = LoadLocalization(dir);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool saw2024 = false, sawLegacy = false;
@@ -112,10 +115,6 @@ public static class ChecklistParser
             set.Notes.Add($"no readable checklist in {string.Join(", ", checklistDirs)} - the generic flow is used");
 
         set.Format = saw2024 ? ChecklistSetFormat.Msfs2024Xml : sawLegacy ? ChecklistSetFormat.LegacyXml : ChecklistSetFormat.None;
-        // The root every include resolves against: set before the parse loop, because the
-        // includes are resolved while it runs and an empty path made the aircraft-wide
-        // branch of ResolveIncludePath dead code.
-        if (set.IsLoaded && string.IsNullOrEmpty(set.SourcePath)) set.SourcePath = dir;
         foreach (var list in set.Lists)
         {
             list.Items.RemoveAll(i => i.Kind == ChecklistItemKind.Header && string.IsNullOrWhiteSpace(i.Subject));
@@ -533,7 +532,12 @@ public static class ChecklistParser
     {
         if (string.IsNullOrEmpty(tt)) return null;
         var key = tt!;
+        // Localization keys often carry a "TT:" prefix; try both forms.
         if (loc.TryGetValue(key, out var text)) return text;
+        if (key.StartsWith("TT:", StringComparison.OrdinalIgnoreCase) &&
+            loc.TryGetValue(key[3..], out text)) return text;
+        var bare = key.StartsWith("TT:", StringComparison.OrdinalIgnoreCase) ? key[3..] : key;
+        if (bare != key && loc.TryGetValue(bare, out text)) return text;
         // "TT:GAME.CHECKLIST_PARKING_BRAKE" -> "PARKING BRAKE" as a last resort.
         var last = key.Split('.', StringSplitOptions.RemoveEmptyEntries).Last();
         last = last.Replace('_', ' ').Trim();
@@ -588,13 +592,17 @@ public static class ChecklistParser
                         continue;
                     }
 
-                    // challenge_response has two text nodes; the first is the state, second the answer.
+                    // challenge_response carries the state in QuestionText and the
+                    // expected answer in AnswerText — separate elements, not the
+                    // joined text blob.
                     var subject = text;
                     var expectation = "";
                     if (type == "challenge_response")
                     {
-                        var parts = text.Split(' ', 2);
-                        if (parts.Length == 2) { subject = parts[0]; expectation = parts[1]; }
+                        var q = item.Elements().Where(e => e.Name.LocalName == "QuestionText").Select(e => (e.Value ?? "").Trim()).FirstOrDefault();
+                        var a = item.Elements().Where(e => e.Name.LocalName == "AnswerText").Select(e => (e.Value ?? "").Trim()).FirstOrDefault();
+                        if (!string.IsNullOrWhiteSpace(q)) subject = q;
+                        if (!string.IsNullOrWhiteSpace(a)) expectation = a;
                     }
                     else
                     {
@@ -661,6 +669,10 @@ public static class ChecklistParser
             || n.Contains("PREPARATION") || n.Contains("PRE-START") || n.Contains("BEFORE PUSHBACK"))
             return ChecklistStep.PREFLIGHT_GATE;
         if (n.Contains("BEFORE TAXI") || n.Contains("TAXI CHECK") || n.Contains("TAXI CHECKS") || n.Contains("BEFORE TAXIING"))
+            return ChecklistStep.PREFLIGHT_TAXI_OUT;
+        // A phase literally named "Taxi"/"Taxi Out" is the outbound taxi
+        // checklist — without this it fell through to PREFLIGHT_GATE.
+        if (n == "TAXI" || n.Contains("TAXI OUT") || n.Contains("TAXI DEPARTURE") || n.Contains("TAXI PHASE"))
             return ChecklistStep.PREFLIGHT_TAXI_OUT;
         if (n.Contains("BEFORE TAKEOFF") || n.Contains("LINEUP") || n.Contains("LINE UP") || n.Contains("RUN UP"))
             return ChecklistStep.FLIGHT_RUNWAY;

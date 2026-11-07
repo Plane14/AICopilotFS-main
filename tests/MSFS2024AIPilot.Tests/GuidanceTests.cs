@@ -10,10 +10,14 @@ public class GuidanceTests
     [Fact]
     public void Wind_components_head_on_course()
     {
-        // Wind from the north at 20 kt, flying south: full headwind.
-        var (head, cross) = WeatherModel.WindComponents(0, 20, 180);
+        // Wind from the south at 20 kt, flying south: full headwind.
+        var (head, cross) = WeatherModel.WindComponents(180, 20, 180);
         Assert.Equal(20, head, 2);
         Assert.Equal(0, cross, 2);
+
+        // Wind from the north while flying south is a tailwind.
+        (head, _) = WeatherModel.WindComponents(0, 20, 180);
+        Assert.Equal(-20, head, 2);
     }
 
     [Fact]
