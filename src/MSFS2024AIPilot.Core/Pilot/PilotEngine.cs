@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.Airports;
 using MSFS2024AIPilot.Core.Atc;
-using MSFS2024AIPilot.Core.Checklists;
 using MSFS2024AIPilot.Core.Environment;
 using MSFS2024AIPilot.Core.Geo;
 using MSFS2024AIPilot.Core.Guidance;
@@ -71,6 +70,7 @@ public sealed class PilotEngine : IDisposable
     private readonly IGlyphRenderer _glyphRenderer = new GdiGlyphRenderer();
     private readonly Dictionary<AtcRequestKind, AtcMenuReader> _menuReaders = new();
     private readonly ChecklistManager _checklists;
+    private readonly ChecklistSimHost _checklistHost;
     private readonly TurbulenceTracker _turbulence = new();
     private readonly OperatingLimits _limits = new();
     private readonly EnvelopeGuard _envelope;
@@ -128,7 +128,8 @@ public sealed class PilotEngine : IDisposable
         _ap = new HybridAutopilot(_aircraft.SimConnect);
         _atcRequests = new AtcRequestEngine(_aircraft.SimConnect);
         _atcRadio = new AtcRadio(_aircraft.SimConnect);
-        _checklists = new ChecklistManager(null);
+        _checklistHost = new ChecklistSimHost(_aircraft.SimConnect);
+        _checklists = new ChecklistManager(_checklistHost, BuildChecklistEnvironment);
         _envelope = new EnvelopeGuard(_limits);
         _traffic = new TrafficMonitor(_aircraft.SimConnect, log: Log);
         _aircraft.SimConnect.OnDataReceived += _traffic.OnData;
@@ -138,7 +139,8 @@ public sealed class PilotEngine : IDisposable
         _aircraft.OnAircraftDirectoryChanged += OnAircraftDirectoryChanged;
         _aircraft.OnError += msg => Log($"[SimConnect] {msg}");
         _facilities.OnError += msg => Log($"[Facilities] {msg}");
-        _checklists.OnChecklistChanged += _ => PublishStatus();
+        _checklists.OnLog += Log;
+        _checklists.OnItemDone += (_, status) => PublishStatusThrottled();
     }
 
     public PilotStatus Status { get { lock (_lock) return _status; } }
@@ -433,9 +435,10 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
-        // Checklist auto-advance: fire bound events and step through items.
+        // Checklists: the ported executor fires copilot actions and verifies
+        // simvars for the aircraft's own checklist steps mapped to this phase.
         _tickStage = "checklist";
-        AdvanceChecklist(s, now);
+        _checklists.Tick(st.Phase, dt);
 
         // Phase machine.
         _tickStage = "phase";
@@ -486,38 +489,20 @@ public sealed class PilotEngine : IDisposable
             (wp?.HasPosition == true ? $" ({wp.Latitude:F3},{wp.Longitude:F3} @{wp.Altitude:F0}ft)" : ""));
     }
 
-    private DateTime _lastChecklistAdvanceUtc = DateTime.MinValue;
-
-    /// <summary>
-    /// Steps the active checklist: fires the sim event bound to the current item
-    /// (when one is known), waits a beat, then marks it done and advances.
-    /// </summary>
-    private void AdvanceChecklist(AircraftState s, DateTime now)
+    private ChecklistEnvironment BuildChecklistEnvironment()
     {
-        var c = _checklists.Current;
-        if (c is null || c.Complete) return;
-        if (now - _lastChecklistAdvanceUtc < TimeSpan.FromMilliseconds(1200)) return;
-
-        var item = c.Items[c.CurrentIndex];
-        var evt = ChecklistBindings.EventFor(item.Text);
-        if (evt is not null && item.EventName is null)
+        var s = _aircraft.IsConnected ? _aircraft.GetSnapshot() : null;
+        return new ChecklistEnvironment
         {
-            // Fire once, then mark done — the sim event is the action.
-            _aircraft.SimConnect.FireEvent(evt);
-            item.EventName = evt; // remember we fired it
-        }
-
-        // Items with a known simvar are considered done when the simvar reports it.
-        var sv = ChecklistBindings.SimVarFor(item.Text);
-        if (sv is not null)
-        {
-            // Simple presence check for the common cases.
-            if (sv.Contains("PARKING")) { if (s.ParkingBrakeSet) { _checklists.Advance(); _lastChecklistAdvanceUtc = now; } return; }
-            if (sv.Contains("GEAR")) { if (!s.GearDown || s.AltitudeAGL > 100) { _checklists.Advance(); _lastChecklistAdvanceUtc = now; } return; }
-        }
-
-        _checklists.Advance();
-        _lastChecklistAdvanceUtc = now;
+            Night = false, // no dedicated day/night simvar is subscribed; Overcast covers the "AS REQUIRED" cases
+            Overcast = s?.AmbientInCloud == true || (s?.PrecipitationState ?? 0) > 0,
+            IcingRisk = (s?.StructuralIcePercent ?? 0) > 0 || ((s?.OAT ?? 15) < -10 && s?.AmbientInCloud == true),
+            Turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                      _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase) ||
+                      _aircraftKind == AircraftKind.Rotorcraft,
+            EngineCount = Math.Max(1, s?.EngineCount ?? _performance.EngineCount),
+            TransponderCode = s?.Squawk,
+        };
     }
 
     private void UpdateServiceStatus(AircraftState s, DateTime now)
@@ -686,24 +671,9 @@ public sealed class PilotEngine : IDisposable
         if (phase == FlightPhase.Approach) _goAroundForTraffic = false;
         lock (_lock) { _status.Phase = phase; _status.StatusText = $"Phase: {phase}"; }
         _phaseEnteredUtc = DateTime.UtcNow;
-        _checklists.SetPhase(MapChecklistPhase(phase));
         Log($"Phase → {phase}");
         PublishStatus();
     }
-
-    private static ChecklistPhase MapChecklistPhase(FlightPhase p) => p switch
-    {
-        FlightPhase.Preflight => ChecklistPhase.Preflight,
-        FlightPhase.Startup => ChecklistPhase.Startup,
-        FlightPhase.TaxiOut => ChecklistPhase.BeforeTakeoff,
-        FlightPhase.Takeoff => ChecklistPhase.BeforeTakeoff,
-        FlightPhase.InitialClimb or FlightPhase.Climb or FlightPhase.Cruise => ChecklistPhase.Cruise,
-        FlightPhase.Descent => ChecklistPhase.Descent,
-        FlightPhase.Approach or FlightPhase.FinalApproach or FlightPhase.GoAround => ChecklistPhase.Approach,
-        FlightPhase.Rollout or FlightPhase.Landing => ChecklistPhase.Landing,
-        FlightPhase.TaxiIn or FlightPhase.Shutdown => ChecklistPhase.Shutdown,
-        _ => ChecklistPhase.Preflight,
-    };
 
     // ---------------- Phase executors ----------------
 
@@ -777,9 +747,10 @@ public sealed class PilotEngine : IDisposable
     {
         _ap.SetDirectMode(true);
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
-        // Wait for the user to complete the preflight checklist, then advance.
-        var c = _checklists.Current;
-        if (c is { Complete: true } || c is null)
+        // Wait for the gate checklists (pushback + gate), then advance.
+        if (!_checklists.IsLoaded ||
+            (_checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE) &&
+             _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK)))
             SetPhase(FlightPhase.Startup);
     }
 
@@ -790,8 +761,9 @@ public sealed class PilotEngine : IDisposable
     {
         _ap.SetDirectMode(true);
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
-        var c = _checklists.Current;
-        if (c is { Complete: true })
+        if (!_checklists.IsLoaded ||
+            (_checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE) &&
+             _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK)))
         {
             if (!s.EnginesRunning)
             {
@@ -2181,7 +2153,7 @@ public sealed class PilotEngine : IDisposable
         _pushbackToggleFired = false;
         _taxiClearanceRequested = false;
         _takeoffClearanceRequested = false;
-        _checklists.Reset(ChecklistPhase.Preflight);
+        _checklists.Reset();
         SetPhase(FlightPhase.Shutdown);
         Log($"[Pilot] Turnaround: servicing for {_serviceMinutes} min, then next leg.");
         PublishStatus();
@@ -2215,7 +2187,7 @@ public sealed class PilotEngine : IDisposable
         try
         {
             _performance = AircraftConfigParser.ParseAircraftConfig(dir);
-            _checklists.Reload(dir);
+            LoadChecklists();
             _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
             _planner.Kind = _aircraftKind;
             lock (_lock) _status.AircraftKind = _aircraftKind;
@@ -2232,6 +2204,28 @@ public sealed class PilotEngine : IDisposable
             }
         }
         catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Loads the aircraft's own checklist set (2024 SimBase XML or legacy text
+    /// format, with checkpoint libraries and .loc localization), falling back to
+    /// the built-in procedural flow when the package ships none.
+    /// </summary>
+    private void LoadChecklists()
+    {
+        var title = _aircraft.AircraftTitle;
+        var set = ChecklistParser.ParseFromAircraft(title);
+        if (!set.IsLoaded)
+        {
+            var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                          _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase) ||
+                          _aircraftKind == AircraftKind.Rotorcraft;
+            var engines = _performance.EngineCount > 0 ? _performance.EngineCount : 1;
+            set = GenericChecklists.Create(title, turbine, engines);
+        }
+        foreach (var note in set.Notes.Take(3)) Log($"[Checklist] {note}");
+        _checklists.Load(set);
+        Log($"[Checklist] Loaded {set.Lists.Count} lists ({set.Format}).");
     }
 
     private void OnStateUpdated(AircraftState s)
@@ -2279,6 +2273,7 @@ public sealed class PilotEngine : IDisposable
     private void PublishStatus()
     {
         PilotStatus copy;
+        var checklist = _checklists.Status();
         lock (_lock)
         {
             copy = new PilotStatus
@@ -2296,11 +2291,13 @@ public sealed class PilotEngine : IDisposable
                 DistanceToGoNm = _status.DistanceToGoNm,
                 EtaMinutes = _status.EtaMinutes,
                 ServiceMinutesRemaining = _status.ServiceMinutesRemaining,
-                ChecklistActive = _checklists.Current is { Complete: false },
-                CurrentChecklistItem = _checklists.Current is { } c && c.CurrentIndex < c.Items.Count
-                    ? c.Items[c.CurrentIndex].Text : "",
-                ChecklistPhaseName = _checklists.Current?.Title ?? _checklists.CurrentPhase.ToString(),
-                ChecklistProgress = _checklists.Current?.Progress ?? 0,
+                ChecklistActive = checklist.Loaded && checklist.Enabled,
+                CurrentChecklistItem = checklist.Loaded && checklist.Item.Length > 0
+                    ? checklist.Item + (checklist.Expectation.Length > 0 ? $" — {checklist.Expectation}" : "") : "",
+                ChecklistPhaseName = checklist.Loaded && checklist.Step.Length > 0
+                    ? checklist.Step : checklist.Source,
+                ChecklistProgress = checklist.Loaded && checklist.Count > 0
+                    ? (double)checklist.Index / checklist.Count : 0,
                 TrafficSummary = _status.TrafficSummary,
                 TrafficContacts = _status.TrafficContacts,
                 LastError = _status.LastError,
@@ -2314,6 +2311,7 @@ public sealed class PilotEngine : IDisposable
         _loopCts?.Cancel();
         try { _loopTask?.Wait(2000); } catch { }
         Disengage();
+        _checklistHost.Dispose();
         _aircraft.SimConnect.OnDataReceived -= _traffic.OnData;
         _traffic.Dispose();
         _facilities.Dispose();

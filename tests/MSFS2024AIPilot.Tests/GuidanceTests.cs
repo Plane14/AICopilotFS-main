@@ -1,4 +1,4 @@
-using MSFS2024AIPilot.Core.Checklists;
+using MSFS2024AIPilot.Core;
 using MSFS2024AIPilot.Core.Environment;
 using MSFS2024AIPilot.Core.Guidance;
 using MSFS2024AIPilot.Core.State;
@@ -35,8 +35,13 @@ public class GuidanceTests
     [Fact]
     public void Checklist_bindings_recognize_common_items()
     {
-        Assert.Equal("GEAR_DOWN", ChecklistBindings.EventFor("Landing gear down"));
-        Assert.Equal("GEAR_UP", ChecklistBindings.EventFor("Gear up"));
-        Assert.Equal("BRAKE PARKING POSITION", ChecklistBindings.SimVarFor("Parking brake set"));
+        var env = new ChecklistEnvironment();
+        var gear = ChecklistTextResolver.Resolve("LANDING GEAR", "DOWN", env);
+        Assert.Contains(gear.Events, e => e.Name == "GEAR_DOWN");
+        Assert.Equal("GEAR HANDLE POSITION", gear.VerifySimVar);
+
+        var brake = ChecklistTextResolver.Resolve("PARKING BRAKE", "SET", env);
+        Assert.Contains(brake.Events, e => e.Name == "PARKING_BRAKE_SET");
+        Assert.Equal("BRAKE PARKING POSITION", brake.VerifySimVar);
     }
 }

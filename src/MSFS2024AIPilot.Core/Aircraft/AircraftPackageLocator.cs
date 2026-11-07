@@ -76,13 +76,35 @@ public static class AircraftPackageLocator
         try
         {
             var normalizedTitle = Normalize(title);
+            if (normalizedTitle.Length == 0) return false;
+            // aircraft.cfg has no single guaranteed identity key: packages variously
+            // publish "title", atc_type/atc_model, or only the ICAO designator, so
+            // every candidate string is collected and matched against the sim title.
+            var candidates = new List<string>();
+            var atcType = "";
+            var atcModel = "";
             foreach (var line in File.ReadLines(cfgPath))
             {
                 var t = line.Trim();
                 var eq = t.IndexOf('=');
-                if (eq < 0 || !t[..eq].Trim().Equals("title", StringComparison.OrdinalIgnoreCase)) continue;
+                if (eq < 0) continue;
+                var key = t[..eq].Trim();
                 var value = t[(eq + 1)..].Trim().Trim('"');
-                return Normalize(value).Contains(normalizedTitle) || normalizedTitle.Contains(Normalize(value));
+                if (key.Equals("title", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("icao_type_designator", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(value);
+                if (key.Equals("atc_type", StringComparison.OrdinalIgnoreCase)) atcType = value;
+                if (key.Equals("atc_model", StringComparison.OrdinalIgnoreCase)) atcModel = value;
+            }
+            if (atcType.Length > 0 && atcModel.Length > 0)
+                candidates.Add(atcType + " " + atcModel);
+            // The package folder name is a slug of the title in many packages.
+            var dirName = Path.GetFileName(Path.GetDirectoryName(cfgPath));
+            if (!string.IsNullOrEmpty(dirName)) candidates.Add(dirName.Replace('_', ' ').Replace('-', ' '));
+            foreach (var c in candidates)
+            {
+                var n = Normalize(c);
+                if (n.Length > 0 && (n.Contains(normalizedTitle) || normalizedTitle.Contains(n))) return true;
             }
         }
         catch { }
