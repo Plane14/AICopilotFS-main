@@ -494,9 +494,10 @@ public static class AircraftConfigParser
             // atc_type/atc_model pair, with icao_type_designator alongside.
             var atcType = Str(g, "atc_type");
             var atcModel = Str(g, "atc_model");
-            perf.Title = Str(g, "title");
+            perf.Title = AircraftPackageLocator.CleanTitle(Str(g, "title"));
             if (perf.Title.Length == 0)
-                perf.Title = string.Join(' ', new[] { atcType, atcModel }.Where(s => s.Length > 0));
+                perf.Title = AircraftPackageLocator.CleanTitle(
+                    string.Join(' ', new[] { atcType, atcModel }.Where(s => s.Length > 0)));
             perf.IcaoType = Str(g, "icao_type_designator");
             perf.Category = FirstNonEmpty(Str(g, "Category"), Str(g, "wake_turbulence_category"));
             perf.ApproachCategory = Str(g, "approach_category");

@@ -36,7 +36,24 @@ public static class ChecklistParser
             return set;
         }
 
+        // The resolved dir is usually the folder holding aircraft.cfg, which in
+        // MSFS 2024 packages is common/config/ while checklists sit in the
+        // sibling common/checklist/ - so the package-layout ancestors are
+        // searched as well. Only named package levels are ascended; walking
+        // arbitrary parents would scan unrelated directory trees.
         var checklistDirs = FindChecklistFolders(dir);
+        var dirName = new DirectoryInfo(dir).Name;
+        var parent = Directory.GetParent(dir);
+        if (parent != null &&
+            (dirName.Equals("config", StringComparison.OrdinalIgnoreCase) ||
+             dirName.Equals("common", StringComparison.OrdinalIgnoreCase)))
+        {
+            checklistDirs.AddRange(FindChecklistFolders(parent.FullName));
+            var grand = parent.Parent;
+            if (grand != null && dirName.Equals("config", StringComparison.OrdinalIgnoreCase))
+                checklistDirs.AddRange(FindChecklistFolders(grand.FullName));
+        }
+        checklistDirs = checklistDirs.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (checklistDirs.Count == 0)
         {
             set.Notes.Add($"no Checklist folder under {dir}");
@@ -122,8 +139,15 @@ public static class ChecklistParser
                 catch { continue; }
                 foreach (var s in subs)
                 {
-                    if (s.Name.Equals("checklist", StringComparison.OrdinalIgnoreCase)) dirs.Add(s.FullName);
-                    else if (s.Name.Length > 0 && !s.Name.StartsWith("texture", StringComparison.OrdinalIgnoreCase))
+                    if (s.Name.Equals("checklist", StringComparison.OrdinalIgnoreCase) ||
+                        s.Name.Equals("checklists", StringComparison.OrdinalIgnoreCase)) dirs.Add(s.FullName);
+                    else if (s.Name.Length > 0 &&
+                             !s.Name.StartsWith("texture", StringComparison.OrdinalIgnoreCase) &&
+                             !s.Name.Equals("sound", StringComparison.OrdinalIgnoreCase) &&
+                             !s.Name.Equals("model", StringComparison.OrdinalIgnoreCase) &&
+                             !s.Name.Equals("panel", StringComparison.OrdinalIgnoreCase) &&
+                             !s.Name.Equals("liveries", StringComparison.OrdinalIgnoreCase) &&
+                             !s.Name.Equals("attachments", StringComparison.OrdinalIgnoreCase))
                         stack.Push(s.FullName);
                 }
             }

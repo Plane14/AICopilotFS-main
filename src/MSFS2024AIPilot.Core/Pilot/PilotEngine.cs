@@ -2213,8 +2213,14 @@ public sealed class PilotEngine : IDisposable
     /// </summary>
     private void LoadChecklists()
     {
+        // The aircraft directory is already resolved by SimAircraft (the
+        // AircraftLoaded path hint); pass it as the override so the parser
+        // does not rescan every package root by title.
         var title = _aircraft.AircraftTitle;
-        var set = ChecklistParser.ParseFromAircraft(title);
+        if (string.IsNullOrWhiteSpace(title) || title.StartsWith("$$", StringComparison.Ordinal))
+            title = _performance.Title;
+        var set = ChecklistParser.ParseFromAircraft(title,
+            rootOverride: string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory) ? null : _aircraft.AircraftDirectory);
         if (!set.IsLoaded)
         {
             var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||

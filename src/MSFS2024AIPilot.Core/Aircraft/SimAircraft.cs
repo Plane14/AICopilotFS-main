@@ -375,6 +375,7 @@ public sealed class SimAircraft : IDisposable
         if (data.DefineId == _titleDefineId)
         {
             var title = OrNull(0);
+            title = AircraftPackageLocator.CleanTitle(title);
             if (string.IsNullOrWhiteSpace(title)) return;
             lock (_stateLock)
             {
@@ -449,7 +450,7 @@ public sealed class SimAircraft : IDisposable
                 if (!t[..eq].Trim().Equals("title", StringComparison.OrdinalIgnoreCase)) continue;
                 var v = t[(eq + 1)..].Trim();
                 if (v.Length >= 2 && v.StartsWith('"') && v.EndsWith('"')) v = v[1..^1];
-                return v;
+                return AircraftPackageLocator.CleanTitle(v);
             }
         }
         catch { }
