@@ -654,9 +654,11 @@ public sealed class PilotEngine : IDisposable
                 break;
         }
 
+        // Do NOT write the local `phase` back here: it was captured before the
+        // switch and would revert every SetPhase() the cases just performed,
+        // leaving the machine stuck re-firing the same transition forever.
         lock (_lock)
         {
-            _status.Phase = phase;
             _status.DistanceToGoNm = RemainingDistanceNm(s);
             _status.EtaMinutes = EtaMinutes(s);
         }

@@ -177,7 +177,7 @@ public sealed class AirportFacilityLoader : IDisposable
         a.ReferenceLongitude = r.ReadFloat64();
         a.ReferenceAltitudeMeters = r.ReadFloat64();
         a.MagneticVariationDeg = r.ReadFloat32();
-        a.Name = r.ReadString(64);
+        a.Name = r.ReadString(32); // NAME is STRING32 per the facilities docs
         r.ReadString(64); // NAME64
         var payloadIcao = r.ReadString(8);
         // Some facilities (small strips, seaplane bases) return no ICAO in the
@@ -190,7 +190,7 @@ public sealed class AirportFacilityLoader : IDisposable
         a.IsClosed = r.ReadInt8() != 0;
         r.ReadString(256); // COUNTRY
         r.ReadString(256); // CITY_STATE
-        for (int i = 0; i < 16; i++) r.ReadInt32(); // N_* counts
+        for (int i = 0; i < 14; i++) r.ReadInt32(); // N_* counts (14 declared fields)
     }
 
     private static void ParseRunway(FacilityDataRecord rec, PendingRequest req)
