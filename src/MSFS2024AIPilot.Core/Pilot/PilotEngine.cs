@@ -698,8 +698,9 @@ public sealed class PilotEngine : IDisposable
             _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight", MenuLinesFor(AtcRequestKind.IfreClearance));
             if (_aircraftKind == AircraftKind.Rotorcraft)
             {
-                // No taxi, no pushback, no runway — lift off in place.
-                SetPhase(FlightPhase.Takeoff);
+                // No runway, no pushback — but allow a low hover-taxi away from
+                // the parking spot toward the departure point first.
+                SetPhase(FlightPhase.TaxiOut);
                 _ap.ParkingBrake(false);
             }
             else
@@ -794,6 +795,13 @@ public sealed class PilotEngine : IDisposable
     private void ExecuteTaxiOut(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
+
+        // Rotorcraft: hover-taxi low toward the departure point, then climb.
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            ExecuteRotorcraftTaxiOut(s, t);
+            return;
+        }
 
         // Water operations: a floatplane/amphibian on a water runway has no
         // ground graph — no pushback, no taxi. Line up on the water and go.
@@ -1130,6 +1138,61 @@ public sealed class PilotEngine : IDisposable
         return fieldElevFt + (dist < 15 ? 500 : 1000);
     }
 
+    /// <summary>
+    /// Rotorcraft ground handling: hover-taxi at ~30 ft AGL and ~25 kt toward a
+    /// departure point ~1 NM from the airport reference along the route
+    /// bearing, then transition to the takeoff climb. If the aircraft is
+    /// already clear of the airport it lifts off in place.
+    /// </summary>
+    private void ExecuteRotorcraftTaxiOut(AircraftState s, ControlTargets t)
+    {
+        var ap = _departureAirport;
+        var distFromField = ap is not null
+            ? GeoMath.DistanceNm(s.Latitude, s.Longitude, ap.ReferenceLatitude, ap.ReferenceLongitude)
+            : 0;
+
+        // Already clear of the airport (or no airport data): climb out in place.
+        if (ap is null || distFromField > 1.5)
+        {
+            SetPhase(FlightPhase.Takeoff);
+            return;
+        }
+
+        var (targetLat, targetLon) = RotorcraftDeparturePoint(s);
+        var distNm = GeoMath.DistanceNm(s.Latitude, s.Longitude, targetLat, targetLon);
+        var fieldElevFt = ap.ReferenceAltitudeMeters * GeoMath.FeetPerMeter;
+
+        t.GearDown = false;
+        t.FlapIndex = 0;
+        t.TargetAltitudeFt = fieldElevFt + 30;  // hover-taxi height
+        t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, targetLat, targetLon);
+        t.TargetAirspeedKt = 25;
+        t.ThrottleFraction = 0.4;
+        t.TargetVsFpm = s.AltitudeAGL < 15 ? 300 : null;
+
+        // Arrived at the departure point (or close enough): go to climb-out.
+        if (distNm < 0.15 || distFromField > 1.2)
+            SetPhase(FlightPhase.Takeoff);
+    }
+
+    /// <summary>Point ~1 NM from the airport reference toward the route.</summary>
+    private (double lat, double lon) RotorcraftDeparturePoint(AircraftState s)
+    {
+        var ap = _departureAirport;
+        if (ap is null) return (s.Latitude, s.Longitude);
+        var next = _routeNav?.Waypoints
+            .Skip(_routeNav.CurrentWaypointIndex)
+            .FirstOrDefault(w => w.HasPosition && w.Type != WaypointType.Airport)
+            ?? _routeNav?.Waypoints.LastOrDefault(w => w.HasPosition);
+        var bearing = next is not null
+            ? GeoMath.BearingDeg(ap.ReferenceLatitude, ap.ReferenceLongitude, next.Latitude, next.Longitude)
+            : (_destinationAirport is not null
+                ? GeoMath.BearingDeg(ap.ReferenceLatitude, ap.ReferenceLongitude,
+                    _destinationAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude)
+                : s.TrueHeading);
+        return GeoMath.DestinationNm(ap.ReferenceLatitude, ap.ReferenceLongitude, bearing, 1.0);
+    }
+
     private void ExecuteRotorcraftTakeoff(AircraftState s, ControlTargets t)
     {
         _ap.SetDirectMode(true);
@@ -1321,8 +1384,13 @@ public sealed class PilotEngine : IDisposable
         t.TargetAltitudeFt = Math.Max(t.TargetAltitudeFt ?? 0, _racetrackTargetAltFt);
 
         var timedOut = DateTime.UtcNow - _racetrackSinceUtc > TimeSpan.FromMinutes(10);
+        // Prefer the nav route: hand control back to the flight-plan guidance
+        // once both the immediate path and the wider look-ahead window are
+        // terrain-clear — the normal step-climb logic takes over from there.
+        var immediateClear = (_terrainProfile?.RequiredAheadFt(s.Latitude, s.Longitude, 5) ?? 0)
+                             <= s.Altitude + 300;
         var terrainClear = TerrainPermitsDescent(s);
-        if (timedOut || terrainClear)
+        if (timedOut || (terrainClear && immediateClear))
         {
             _racetrackActive = false;
             Log(timedOut
