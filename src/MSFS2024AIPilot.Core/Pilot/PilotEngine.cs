@@ -76,6 +76,7 @@ public sealed class PilotEngine : IDisposable
     private TrafficAssessment _trafficAssessment = new();
     private DateTime _lastTrafficLogUtc = DateTime.MinValue;
     private bool _goAroundForTraffic;
+    private DateTime _lastLegRetryUtc = DateTime.MinValue;
 
     private readonly object _lock = new();
     private PilotStatus _status = new();
@@ -172,6 +173,16 @@ public sealed class PilotEngine : IDisposable
         _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
         _nav.Reset();
         _goAroundForTraffic = false;
+
+        // The plan's own waypoints carry the approach: the last positioned
+        // waypoint is the runway end, the one before it approximates the final
+        // approach fix. Without these the phase machine never leaves Descent.
+        var positioned = wps.Where(w => w.HasPosition).ToList();
+        if (positioned.Count > 0)
+        {
+            _route.RunwayWaypoint = positioned[^1];
+            _route.FinalApproachFix = positioned.Count > 1 ? positioned[^2] : positioned[^1];
+        }
 
         lock (_lock)
         {
@@ -481,8 +492,29 @@ public sealed class PilotEngine : IDisposable
                 break;
 
             case FlightPhase.Shutdown:
-                if (_status.Mode == PilotMode.Continuous && _serviceUntilUtc == default)
-                    BeginTurnaround(s);
+                if (_status.Mode == PilotMode.Continuous)
+                {
+                    if (_serviceUntilUtc == default)
+                    {
+                        BeginTurnaround(s);
+                    }
+                    else if (_route is null && now - _lastLegRetryUtc > TimeSpan.FromSeconds(30))
+                    {
+                        // Service is over but the next leg never got planned
+                        // (no destination in range, airport list late, ...).
+                        // Retry instead of sitting in Shutdown forever.
+                        _lastLegRetryUtc = now;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (await PlanNextLegAsync(CancellationToken.None) && _route is not null)
+                                    SetPhase(FlightPhase.Preflight);
+                            }
+                            catch (Exception ex) { Log($"[Pilot] Next-leg retry failed: {ex.Message}"); }
+                        });
+                    }
+                }
                 break;
         }
 
@@ -611,10 +643,13 @@ public sealed class PilotEngine : IDisposable
                 // Cold aircraft: try the starter until the engines catch or we give up.
                 if (_starterAttempts < 6 && now - _starterAttemptUtc > TimeSpan.FromSeconds(4))
                 {
-                    _aircraft.SimConnect.FireEvent("TOGGLE_STARTER1");
+                    // Fire the starter for every engine the aircraft reports.
+                    var engines = Math.Clamp(s.EngineCount, 1, 4);
+                    for (int e = 1; e <= engines; e++)
+                        _aircraft.SimConnect.FireEvent($"TOGGLE_STARTER{e}");
                     _starterAttemptUtc = now;
                     _starterAttempts++;
-                    Log("[Pilot] Attempting engine start.");
+                    Log($"[Pilot] Attempting engine start ({engines} engine(s)).");
                 }
                 return;
             }
@@ -631,6 +666,7 @@ public sealed class PilotEngine : IDisposable
     {
         _taxiLegIndex = 0;
         _taxiRoute = null;
+        _taxiInPlanned = false;
         _pushbackProgress = new PushbackProgress { StartedUtc = DateTime.UtcNow };
         _departureRunwayName = null;
         // Pick the runway first so the taxi route can hold short correctly.
@@ -640,9 +676,15 @@ public sealed class PilotEngine : IDisposable
     private string? _departureRunwayName;
     private string? _arrivalRunwayName;
 
+    private DateTime _lastDeparturePlanUtc = DateTime.MinValue;
+
     private void PlanDeparture(AircraftState s)
     {
         if (_departureAirport is null) return;
+        // Called every frame while no route exists; don't replan (and re-log)
+        // more than once every few seconds.
+        if (DateTime.UtcNow - _lastDeparturePlanUtc < TimeSpan.FromSeconds(5)) return;
+        _lastDeparturePlanUtc = DateTime.UtcNow;
 
         // Choose the runway: into the wind, long enough for takeoff.
         var pick = ContinuousFlightPlanner.PickRunway(_departureAirport, s.WindDirection,
@@ -962,8 +1004,11 @@ public sealed class PilotEngine : IDisposable
             t.TargetAirspeedKt = cruiseSpeedKt();
         }
 
-        if (t.GearDown is null && s.AltitudeAGL < 3500 && s.Altitude < _targetCruiseAltitudeFt - 1000)
-            t.GearDown = true;
+        // Gear: retract once comfortably airborne, re-extend on short final.
+        // (Previously this only ever commanded gear DOWN below 3500 ft AGL, so
+        // the gear stayed down for the whole flight.)
+        if (s.AltitudeAGL > 2500) t.GearDown = false;
+        else if (s.AltitudeAGL < 600) t.GearDown = true;
     }
 
     private double cruiseSpeedKt() =>

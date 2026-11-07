@@ -129,7 +129,11 @@ public static class RouteBuilder
                 Type = WaypointType.Intersection,
                 Latitude = fafLat,
                 Longitude = fafLon,
-                Altitude = req.CruiseAltitudeFt,
+                // On a ~3 deg glidepath at FinalLegNm: the approach/descent
+                // phases hold this as a target, so it must be near the field —
+                // cruise altitude here would leave the aircraft level at cruise
+                // all the way to the threshold.
+                Altitude = thresholdAlt + FinalLegNm * 318.0,
             };
             route.Waypoints.Add(faf);
             route.FinalApproachFix = faf;

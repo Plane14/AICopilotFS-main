@@ -255,6 +255,13 @@ public sealed class HybridAutopilot
         _directMode = direct;
         ResetAll();
         if (direct) ApMaster(false);
-        else Neutralize();
+        else
+        {
+            Neutralize();
+            // Mode latches must be re-armed for the next leg: NAV/APR hold are
+            // one-shot events, and without this a second flight never re-engages
+            // approach or GPS navigation tracking.
+            _lastNav = _lastApr = false;
+        }
     }
 }
