@@ -137,6 +137,7 @@ public sealed class PilotEngine : IDisposable
         _aircraft.OnAircraftTitleChanged += OnTitleChanged;
         _aircraft.OnAircraftDirectoryChanged += OnAircraftDirectoryChanged;
         _aircraft.OnError += msg => Log($"[SimConnect] {msg}");
+        _facilities.OnError += msg => Log($"[Facilities] {msg}");
         _checklists.OnChecklistChanged += _ => PublishStatus();
     }
 
@@ -225,14 +226,26 @@ public sealed class PilotEngine : IDisposable
         return true;
     }
 
-    /// <summary>Nearest airport to the aircraft, using the facility list coordinates.</summary>
+    /// <summary>
+    /// Airport the aircraft is at/near, using the facility list coordinates.
+    /// Tries the nearest candidates in turn — a strip missing from the facility
+    /// database or a failed load must not abort departure planning.
+    /// </summary>
     private async Task<AirportData?> FindNearestAirportAsync(AircraftState s, CancellationToken ct)
     {
         if (!await _planner.WaitForAirportListAsync(TimeSpan.FromSeconds(30), ct)) return null;
-        var near = _planner.NearestAirport(s.Latitude, s.Longitude);
-        if (near is null) return null;
-        Log($"[Pilot] Nearest airport: {near.Value.icao} ({near.Value.distNm:F1} nm)");
-        return await _planner.LoadAirportAsync(near.Value.icao, TimeSpan.FromSeconds(20), ct);
+        var candidates = _planner.NearestAirports(s.Latitude, s.Longitude, 8);
+        if (candidates.Count == 0) return null;
+        Log($"[Pilot] Position {s.Latitude:F4},{s.Longitude:F4}; nearest listed airports: " +
+            string.Join(", ", candidates.Take(3).Select(c => $"{c.icao} {c.distNm:F1}nm")));
+        foreach (var c in candidates)
+        {
+            var data = await _planner.LoadAirportAsync(c.icao, TimeSpan.FromSeconds(15), ct);
+            if (data is null) { Log($"[Pilot] Facility data unavailable for {c.icao} ({c.distNm:F1} nm) — trying next."); continue; }
+            Log($"[Pilot] Nearest airport: {data.Icao} ({c.distNm:F1} nm)");
+            return data;
+        }
+        return null;
     }
 
     /// <summary>Starts (or resumes) the control loop.</summary>

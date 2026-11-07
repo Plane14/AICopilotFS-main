@@ -18,6 +18,9 @@ public sealed class AirportFacilityLoader : IDisposable
     private readonly Dictionary<uint, PendingRequest> _pending = new();
 
     public event Action<AirportData>? OnAirportLoaded;
+
+    /// <summary>Fires with the facility request id so callers can match the exact request.</summary>
+    public event Action<uint, AirportData>? OnAirportLoadedForRequest;
     public event Action<string>? OnError;
     public SimConnectClient SimConnect => _sc;
 
@@ -86,14 +89,15 @@ public sealed class AirportFacilityLoader : IDisposable
         F("CLOSE AIRPORT");
     }
 
-    /// <summary>Requests the full ground network for an airport (ICAO, e.g. "KLAX").</summary>
-    public void RequestAirport(string icao)
+    /// <summary>Requests the full ground network for an airport (ICAO, e.g. "KLAX"). Returns the request id.</summary>
+    public uint RequestAirport(string icao)
     {
         var requestId = _nextRequestId++;
         var pending = new PendingRequest { Icao = icao };
         pending.Airport.Icao = icao;
         _pending[requestId] = pending;
         _sc.RequestFacilityData(_airportDefineId, requestId, icao);
+        return requestId;
     }
 
     /// <summary>Requests the bare list of airports known to the sim (ICAO list).</summary>
@@ -135,6 +139,7 @@ public sealed class AirportFacilityLoader : IDisposable
             var airport = req.Airport;
             airport.IsLoaded = airport.Nodes.Count > 0;
             _pending.Remove(userRequestId);
+            OnAirportLoadedForRequest?.Invoke(userRequestId, airport);
             OnAirportLoaded?.Invoke(airport);
         }
         catch (Exception ex)
@@ -159,7 +164,10 @@ public sealed class AirportFacilityLoader : IDisposable
         a.MagneticVariationDeg = r.ReadFloat32();
         a.Name = r.ReadString(64);
         r.ReadString(64); // NAME64
-        a.Icao = r.ReadString(8);
+        var payloadIcao = r.ReadString(8);
+        // Some facilities (small strips, seaplane bases) return no ICAO in the
+        // payload — keep the ident we requested so callers can still match it.
+        if (!string.IsNullOrEmpty(payloadIcao)) a.Icao = payloadIcao;
         a.Region = r.ReadString(8);
         r.ReadFloat64(); r.ReadFloat64(); r.ReadFloat64(); // tower pos/alt
         a.TransitionAltitudeMeters = r.ReadFloat32();

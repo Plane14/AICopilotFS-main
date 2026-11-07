@@ -91,21 +91,29 @@ public sealed class ContinuousFlightPlanner
     {
         if (_cache.TryGetValue(icao, out var cached)) return cached;
         var tcs = new TaskCompletionSource<AirportData>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void Handler(AirportData a)
+        uint requestId = 0;
+        // Match on the facility request id, not the ICAO string — the payload
+        // ident can differ from (or be missing relative to) the list ident.
+        void Handler(uint id, AirportData a)
         {
-            if (a.Icao.Equals(icao, StringComparison.OrdinalIgnoreCase)) tcs.TrySetResult(a);
+            if (id == requestId) tcs.TrySetResult(a);
         }
-        _loader.OnAirportLoaded += Handler;
+        _loader.OnAirportLoadedForRequest += Handler;
         try
         {
-            _loader.RequestAirport(icao);
+            requestId = _loader.RequestAirport(icao);
             var delay = Task.Delay(timeout, ct);
             var done = await Task.WhenAny(tcs.Task, delay);
-            return done == tcs.Task ? await tcs.Task : null;
+            if (done != tcs.Task) return null;
+            var airport = await tcs.Task;
+            // Cache under both the requested ident and the payload ident —
+            // they can differ for small strips.
+            lock (_lock) { _cache[icao] = airport; if (!string.IsNullOrEmpty(airport.Icao)) _cache[airport.Icao] = airport; }
+            return airport;
         }
         finally
         {
-            _loader.OnAirportLoaded -= Handler;
+            _loader.OnAirportLoadedForRequest -= Handler;
         }
     }
 
@@ -181,18 +189,22 @@ public sealed class ContinuousFlightPlanner
     /// <summary>ICAO + position of the airport nearest to a point, from the list (no facility load).</summary>
     public (string icao, double lat, double lon, double distNm)? NearestAirport(double lat, double lon)
     {
+        var list = NearestAirports(lat, lon, 1);
+        return list.Count > 0 ? list[0] : null;
+    }
+
+    /// <summary>The <paramref name="count"/> nearest airports to a point, nearest first.</summary>
+    public List<(string icao, double lat, double lon, double distNm)> NearestAirports(double lat, double lon, int count)
+    {
         lock (_lock)
         {
-            string? best = null;
-            double bestDist = double.MaxValue;
-            foreach (var (icao, p) in _positions)
-            {
-                var d = GeoMath.DistanceNm(lat, lon, p.lat, p.lon);
-                if (d < bestDist) { bestDist = d; best = icao; }
-            }
-            if (best is null) return null;
-            var pos = _positions[best];
-            return (best, pos.lat, pos.lon, bestDist);
+            return _positions
+                .Select(kv => (kv.Key, kv.Value.lat, kv.Value.lon,
+                    GeoMath.DistanceNm(lat, lon, kv.Value.lat, kv.Value.lon)))
+                .OrderBy(t => t.Item4)
+                .Take(count)
+                .Select(t => (t.Item1, t.Item2, t.Item3, t.Item4))
+                .ToList();
         }
     }
 
