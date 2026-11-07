@@ -33,8 +33,10 @@ public partial class MainWindow : Window
     private PilotEngine CreateEngine()
     {
         var engine = new PilotEngine();
-        engine.OnStatusChanged += status => Dispatcher.Invoke(() => ApplyStatus(status));
-        engine.OnLog += msg => Dispatcher.Invoke(() => AppendLog(msg));
+        // BeginInvoke (not Invoke): the engine's control loop calls these
+        // synchronously — a busy UI thread must never stall flight control.
+        engine.OnStatusChanged += status => Dispatcher.BeginInvoke(() => ApplyStatus(status));
+        engine.OnLog += msg => Dispatcher.BeginInvoke(() => AppendLog(msg));
         return engine;
     }
 

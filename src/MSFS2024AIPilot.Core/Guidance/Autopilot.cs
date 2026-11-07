@@ -75,6 +75,8 @@ public sealed class HybridAutopilot
 
     private bool _directMode;
     private bool _axesNeutralised;
+    private double _lastSentPitch, _lastSentBank, _lastSentRudder, _lastSentThrottle = double.NaN;
+    private bool _axesPrimed;
 
     // Last values sent to the native autopilot (dedup — these are toggle events).
     private double? _lastHdg, _lastAlt, _lastVs, _lastIas, _lastThr;
@@ -230,8 +232,28 @@ public sealed class HybridAutopilot
         var bank = Math.Clamp(bankCmd, -1, 1);
         var rudder = Math.Clamp(rudderCmd, -1, 1);
 
-        if (pitch == 0 && bank == 0 && rudder == 0 && throttle == 0 && _axesNeutralised) return;
-        _axesNeutralised = pitch == 0 && bank == 0 && rudder == 0 && throttle == 0;
+        // Deadband: skip the four axis events when outputs haven't meaningfully
+        // changed — at 20 Hz this cuts hundreds of no-op SimConnect events per
+        // second during steady flight. ~0.4% of full-scale deflection.
+        const double eps = 0.004;
+        if (_axesPrimed &&
+            Math.Abs(pitch - _lastSentPitch) < eps &&
+            Math.Abs(bank - _lastSentBank) < eps &&
+            Math.Abs(rudder - _lastSentRudder) < eps &&
+            Math.Abs(throttle - _lastSentThrottle) < eps * 2 &&
+            !(pitch == 0 && bank == 0 && rudder == 0 && throttle == 0 && !_axesNeutralised))
+            return;
+
+        _axesPrimed = true;
+        _lastSentPitch = pitch; _lastSentBank = bank;
+        _lastSentRudder = rudder; _lastSentThrottle = throttle;
+
+        if (pitch == 0 && bank == 0 && rudder == 0 && throttle == 0)
+        {
+            if (_axesNeutralised) return;
+            _axesNeutralised = true;
+        }
+        else _axesNeutralised = false;
 
         Axis("AXIS_ELEVATOR_SET", pitch);
         Axis("AXIS_AILERONS_SET", bank);
@@ -249,11 +271,19 @@ public sealed class HybridAutopilot
     /// <summary>Returns all axes to neutral and releases the throttle to idle-ish.</summary>
     public void Neutralize()
     {
+        // Already-neutral surfaces need no events — callers such as the service
+        // wait invoke this every tick and would otherwise spam 60 events/s.
+        if (_axesNeutralised) return;
         var neutral = (uint)Math.Round((0.0 + 1.0) * 16384.0 / 2.0);
         _sc.FireEvent("AXIS_ELEVATOR_SET", neutral);
         _sc.FireEvent("AXIS_AILERONS_SET", neutral);
         _sc.FireEvent("AXIS_RUDDER_SET", neutral);
         _axesNeutralised = true;
+        // The sim's surfaces are now neutral — sync the deadband cache or the
+        // next matching command would be suppressed while the aircraft sits
+        // with neutral controls. Throttle is untouched by Neutralize, so its
+        // last-sent value stays accurate.
+        _lastSentPitch = _lastSentBank = _lastSentRudder = 0;
     }
 
     /// <summary>Switch between native and direct control, cleaning up the other mode.</summary>
@@ -262,6 +292,7 @@ public sealed class HybridAutopilot
         if (_directMode == direct) return;
         _directMode = direct;
         ResetAll();
+        _axesPrimed = false;
         if (direct) ApMaster(false);
         else
         {

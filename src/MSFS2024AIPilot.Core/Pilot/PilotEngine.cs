@@ -163,7 +163,14 @@ public sealed class PilotEngine : IDisposable
     {
         var (wps, nav) = PlnFile.Parse(plnPath);
         if (wps.Count == 0) { Log("[Pilot] Flight plan file has no waypoints."); return false; }
+        // Shares the route-planning gate with continuous/manual planning.
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try { return await LoadFlightPlanCoreAsync(plnPath, wps, nav, ct); }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
+    }
 
+    private async Task<bool> LoadFlightPlanCoreAsync(string plnPath, List<FlightPlanWaypoint> wps, NavigationState nav, CancellationToken ct)
+    {
         var s = _aircraft.GetSnapshot();
         _routeNav = nav;
         _routeNav.Waypoints = wps;
@@ -257,7 +264,7 @@ public sealed class PilotEngine : IDisposable
             _departureAirport = await FindNearestAirportAsync(s, CancellationToken.None);
             if (_departureAirport is null) { Log("[Pilot] Could not identify the departure airport."); return; }
             Log($"[Pilot] Continuous flights departing from {_departureAirport.Icao}.");
-            await PlanNextLegAsync(CancellationToken.None);
+            await TryPlanNextLegAsync(CancellationToken.None);
             if (_route is not null) SetPhase(FlightPhase.Preflight);
         }
         catch (Exception ex) { Log($"[Pilot] Continuous departure planning failed: {ex.Message}"); }
@@ -293,7 +300,7 @@ public sealed class PilotEngine : IDisposable
     public async Task<bool> FlyNextLegAsync(CancellationToken ct = default)
     {
         if (!ContinuousEnabled) return false;
-        return await PlanNextLegAsync(ct);
+        return await TryPlanNextLegAsync(ct);
     }
 
     private void StartLoop()
@@ -318,7 +325,15 @@ public sealed class PilotEngine : IDisposable
             }
             catch (Exception ex)
             {
-                Log($"[Pilot] loop error: {ex.Message}");
+                // A persistent fault would otherwise write ~20 lines/second to
+                // the log and GUI forever. Log the first occurrence and then
+                // at most once every 10 s, always with the exception type.
+                var errNow = DateTime.UtcNow;
+                if (errNow - _lastLoopErrorLogUtc > TimeSpan.FromSeconds(10))
+                {
+                    _lastLoopErrorLogUtc = errNow;
+                    Log($"[Pilot] loop error ({ex.GetType().Name}): {ex.Message}");
+                }
             }
             await Task.Delay(50, ct).ConfigureAwait(false);
         }
@@ -380,6 +395,48 @@ public sealed class PilotEngine : IDisposable
         // Phase machine.
         AdvancePhase(s, now);
         ExecutePhase(s, dt, now, turbulence);
+
+        // Periodic flight diagnostics (~every 5 s while AI is active).
+        if (now - _lastDiagUtc > TimeSpan.FromSeconds(5))
+        {
+            _lastDiagUtc = now;
+            LogDiagnostics(s);
+        }
+    }
+
+    private DateTime _lastDiagUtc = DateTime.MinValue;
+    private DateTime _lastLoopErrorLogUtc = DateTime.MinValue;
+    private ControlTargets _lastTargets = new();
+    private int _lastLoggedWpIndex = -1;
+
+    /// <summary>Logs a compact one-line snapshot of flight state and targets.</summary>
+    private void LogDiagnostics(AircraftState s)
+    {
+        var t = _lastTargets;
+        var tgt = string.Join(' ', new[]
+        {
+            t.TargetHeadingDeg is { } h ? $"HDG {h:F0}" : null,
+            t.TargetAltitudeFt is { } a ? $"ALT {a:F0}" : null,
+            t.TargetAirspeedKt is { } i ? $"IAS {i:F0}" : null,
+            t.TargetVsFpm is { } v ? $"VS {v:F0}" : null,
+            t.ThrottleFraction is { } th ? $"THR {th:P0}" : null,
+            t.GearDown is { } g ? (g ? "GEAR↓" : "GEAR↑") : null,
+            t.FlapIndex is { } f ? $"FLAP {f}" : null,
+        }.Where(x => x is not null));
+        Log($"[Diag] {Status.Phase} | {s.IndicatedAirspeed:F0}kt {s.Altitude:F0}ft {s.VerticalSpeed:+0;-0;0}fpm " +
+            $"hdg {s.TrueHeading:F0} gs {s.GroundSpeed:F0} | {Status.DistanceToGoNm:F0}nm ~{Status.EtaMinutes:F0}min | " +
+            $"{(_ap.DirectMode ? "DIRECT" : "NAV-AP")} | {tgt}");
+    }
+
+    /// <summary>Logs each flight-plan waypoint capture once.</summary>
+    private void LogNavProgress()
+    {
+        var idx = _nav.ActiveIndex;
+        if (idx == _lastLoggedWpIndex || _routeNav is null) return;
+        _lastLoggedWpIndex = idx;
+        var wp = idx >= 0 && idx < _routeNav.Waypoints.Count ? _routeNav.Waypoints[idx] : null;
+        Log($"[Nav] waypoint {idx + 1}/{_routeNav.Waypoints.Count}: {wp?.Ident ?? "?"}" +
+            (wp?.HasPosition == true ? $" ({wp.Latitude:F3},{wp.Longitude:F3} @{wp.Altitude:F0}ft)" : ""));
     }
 
     private DateTime _lastChecklistAdvanceUtc = DateTime.MinValue;
@@ -555,7 +612,7 @@ public sealed class PilotEngine : IDisposable
                         {
                             try
                             {
-                                if (await PlanNextLegAsync(CancellationToken.None) && _route is not null)
+                                if (await TryPlanNextLegAsync(CancellationToken.None) && _route is not null)
                                     SetPhase(FlightPhase.Preflight);
                             }
                             catch (Exception ex) { Log($"[Pilot] Next-leg retry failed: {ex.Message}"); }
@@ -577,6 +634,9 @@ public sealed class PilotEngine : IDisposable
     private void SetPhase(FlightPhase phase)
     {
         if (phase == FlightPhase.Startup) { _starterAttempts = 0; _starterAttemptUtc = DateTime.MinValue; }
+        // Each new approach gets one traffic go-around — the flag must not
+        // stay latched for the rest of the flight after a missed approach.
+        if (phase == FlightPhase.Approach) _goAroundForTraffic = false;
         lock (_lock) { _status.Phase = phase; _status.StatusText = $"Phase: {phase}"; }
         _phaseEnteredUtc = DateTime.UtcNow;
         _checklists.SetPhase(MapChecklistPhase(phase));
@@ -656,6 +716,7 @@ public sealed class PilotEngine : IDisposable
                 break;
         }
 
+        _lastTargets = targets;
         _ap.SetTargets(targets);
         _ap.Update(s, dt);
     }
@@ -837,11 +898,13 @@ public sealed class PilotEngine : IDisposable
         }
         _pushbackDone = true;
 
-        // Wait for taxi clearance if the airport is towered.
-        if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTaxi && !_taxiClearanceRequested)
+        // Wait for taxi clearance if the airport is towered. Re-request every
+        // 60 s while still pending — a timed-out or denied request must not
+        // leave the aircraft waiting forever.
+        if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTaxi &&
+            RequestDue(AtcRequestKind.Taxi, ref _taxiClearanceRequested, ref _lastTaxiRequestUtc, now))
         {
             _atcRequests.Request(AtcRequestKind.Taxi, "taxi-out", MenuLinesFor(AtcRequestKind.Taxi));
-            _taxiClearanceRequested = true;
         }
 
         // Route to the runway and taxi.
@@ -853,10 +916,10 @@ public sealed class PilotEngine : IDisposable
             // Reached the hold-short: hold position and request takeoff clearance.
             _ap.SetThrottleFraction(0);
             _ap.ParkingBrake(true);
-            if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTakeoff && !_takeoffClearanceRequested)
+            if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTakeoff &&
+                RequestDue(AtcRequestKind.Takeoff, ref _takeoffClearanceRequested, ref _lastTakeoffRequestUtc, now))
             {
                 _atcRequests.Request(AtcRequestKind.Takeoff, "hold-short", MenuLinesFor(AtcRequestKind.Takeoff));
-                _takeoffClearanceRequested = true;
             }
             if (!s.Atc.DepartureAirportIsTowered || s.Atc.ClearedTakeoff)
             {
@@ -908,13 +971,35 @@ public sealed class PilotEngine : IDisposable
         return null;
     }
 
+    private string _lastTrafficSignature = "";
+    private bool _lastTrafficUnsafe;
+
     private void PublishTrafficStatus()
     {
         var a = _trafficAssessment;
+        // Signature uses coarse-grained values so the status refreshes a few
+        // times a minute at most, not every tick — Describe() embeds live
+        // distances that would otherwise change constantly.
+        var occupant = a.DepartureRunwayOccupant;
+        var onFinal = a.ArrivalOnDepartureRunway;
+        var signature =
+            $"{a.Contacts.Count}|{a.AirborneConflicts.Count}|" +
+            $"{(occupant is null ? -1 : (int)(occupant.RangeMeters / 100))}|" +
+            $"{(onFinal is null ? -1 : (int)(onFinal.RangeNauticalMiles * 2))}";
+        if (signature == _lastTrafficSignature) return;
+        _lastTrafficSignature = signature;
         lock (_lock)
         {
             _status.TrafficSummary = a.Contacts.Count == 0 ? "" : a.Describe();
             _status.TrafficContacts = a.Contacts.Count;
+        }
+
+        // Log only on transitions into/out of an unsafe assessment — the
+        // hold/go-around paths log their own throttled messages.
+        if (a.RunwayEntryUnsafe != _lastTrafficUnsafe)
+        {
+            _lastTrafficUnsafe = a.RunwayEntryUnsafe;
+            Log($"[Traffic] {(a.RunwayEntryUnsafe ? "conflict: " : "clear: ")}{a.Describe()}");
         }
     }
 
@@ -937,6 +1022,23 @@ public sealed class PilotEngine : IDisposable
     private bool _pushbackDone;
     private bool _taxiClearanceRequested;
     private bool _takeoffClearanceRequested;
+    private DateTime _lastTaxiRequestUtc = DateTime.MinValue;
+    private DateTime _lastTakeoffRequestUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// True when an ATC request should be (re)issued: the first time, or every
+    /// 60 s after the previous attempt ended (timeout/denial) — never while the
+    /// same kind is still being probed.
+    /// </summary>
+    private bool RequestDue(AtcRequestKind kind, ref bool requested, ref DateTime lastUtc, DateTime now)
+    {
+        var inFlight = _atcRequests.Pending == kind && _atcRequests.Status == AtcRequestStatus.Requested;
+        if (inFlight) return false;
+        if (requested && now - lastUtc < TimeSpan.FromSeconds(60)) return false;
+        requested = true;
+        lastUtc = now;
+        return true;
+    }
 
     /// <summary>True when departing an airport on a water runway (float/amphib).</summary>
     private bool DepartureOnWater()
@@ -1112,6 +1214,7 @@ public sealed class PilotEngine : IDisposable
             var (_, heading, target) = _nav.Update(s, _routeNav);
             t.TargetHeadingDeg = heading;
             t.TrackNav = true;
+            LogNavProgress();
 
             // Slow to turbulence penetration speed when rough.
             if (turbulence is TurbulenceLevel.Moderate or TurbulenceLevel.Severe)
@@ -1285,6 +1388,7 @@ public sealed class PilotEngine : IDisposable
             var (_, heading, _) = _nav.Update(s, _routeNav);
             t.TargetHeadingDeg = heading;
             t.TrackNav = true;
+            LogNavProgress();
         }
         else
         {
@@ -1589,7 +1693,9 @@ public sealed class PilotEngine : IDisposable
         if (threshold is not null)
         {
             // Fly the extended centreline to the threshold.
-            var brg = rw is not null ? rw.HeadingDegTrue : GeoMath.BearingDeg(threshold.Value.Item1, threshold.Value.Item2, s.Latitude, s.Longitude);
+            var brg = rw is not null
+                ? rw.HeadingDegTrue
+                : GeoMath.BearingDeg(s.Latitude, s.Longitude, threshold.Value.Item1, threshold.Value.Item2);
             t.TargetHeadingDeg = brg;
         }
 
@@ -1738,10 +1844,17 @@ public sealed class PilotEngine : IDisposable
     public async Task<bool> PlanFlightAsync(AirportData destination, CancellationToken ct = default)
     {
         var s = _aircraft.GetSnapshot();
-        _departureAirport ??= await FindNearestAirportAsync(s, ct);
-        if (_departureAirport is null) { Log("[Pilot] Cannot determine departure airport."); return false; }
-        _destinationAirport = destination;
-        return await BuildAndLoadRouteAsync(s, ct);
+        // Same gate as continuous planning — acquire before mutating any
+        // shared fields so a rejected call leaves state untouched.
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try
+        {
+            _departureAirport ??= await FindNearestAirportAsync(s, ct);
+            if (_departureAirport is null) { Log("[Pilot] Cannot determine departure airport."); return false; }
+            _destinationAirport = destination;
+            return await BuildAndLoadRouteAsync(s, ct);
+        }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
     }
 
     private async Task<bool> BuildAndLoadRouteAsync(AircraftState s, CancellationToken ct = default)
@@ -1920,6 +2033,20 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Continuous flights ----------------
 
+    /// <summary>
+    /// Plans at most one leg at a time. The turnaround timer and the Shutdown
+    /// retry can both fire near the end of a service window — without the gate
+    /// they would pick destinations and build routes concurrently.
+    /// </summary>
+    private int _routePlanning;
+
+    private async Task<bool> TryPlanNextLegAsync(CancellationToken ct)
+    {
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try { return await PlanNextLegAsync(ct); }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
+    }
+
     private async Task<bool> PlanNextLegAsync(CancellationToken ct)
     {
         var s = _aircraft.GetSnapshot();
@@ -1988,7 +2115,7 @@ public sealed class PilotEngine : IDisposable
                 while (_serviceUntilUtc > DateTime.UtcNow) await Task.Delay(1000);
                 if (ContinuousEnabled)
                 {
-                    await PlanNextLegAsync(CancellationToken.None);
+                    await TryPlanNextLegAsync(CancellationToken.None);
                     if (_route is not null) SetPhase(FlightPhase.Preflight);
                 }
             }
@@ -2033,9 +2160,41 @@ public sealed class PilotEngine : IDisposable
         PublishStatusThrottled();
     }
 
+    private string? _logFilePath;
+    private readonly object _logFileLock = new();
+    private int _logFileLines;
+
     private void Log(string msg)
     {
-        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss} {msg}");
+        var line = $"{DateTime.Now:HH:mm:ss} {msg}";
+        try { OnLog?.Invoke(line); } catch { /* a dead subscriber must not break the loop */ }
+        // Mirror every line to a daily log file for post-flight analysis.
+        // Bounded size: once a day-file exceeds ~4 MB it is rotated aside so
+        // continuous flights cannot grow it without limit.
+        try
+        {
+            lock (_logFileLock)
+            {
+                if (_logFilePath is null)
+                {
+                    var dir = Path.Combine(
+                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                        "AICopilotFS");
+                    Directory.CreateDirectory(dir);
+                    _logFilePath = Path.Combine(dir, $"pilot-{DateTime.Now:yyyyMMdd}.log");
+                }
+                if (_logFileLines >= 60000)
+                {
+                    var rotated = _logFilePath + ".1";
+                    try { File.Delete(rotated); } catch { }
+                    try { File.Move(_logFilePath, rotated); } catch { }
+                    _logFileLines = 0;
+                }
+                File.AppendAllText(_logFilePath, line + System.Environment.NewLine);
+                _logFileLines++;
+            }
+        }
+        catch { /* logging must never break the flight loop */ }
     }
 
     private void PublishStatus()

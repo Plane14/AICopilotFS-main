@@ -49,7 +49,8 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | ATC screen capture | `Core/Atc/AtcScreenCapture.cs`, `Core/Atc/AtcMenuScreenReader.cs` | GDI capture of the simulator window + template-matched menu-line recognition; recognised lines are tried before learned/sequential probing |
 | Traffic monitor | `Core/Traffic/TrafficMonitor.cs` | `SimConnect_RequestDataOnSimObjectType` aircraft feed, stale-contact expiry, runway occupancy / on-final / airborne-conflict assessment; gates hold-short entry and triggers go-around |
 | Checklists | `Core/Checklists/Checklists.cs` | MSFS `SimBase.Document` checklist XML + generic fallbacks + event/simvar bindings |
-| Orchestrator | `Core/Pilot/PilotEngine.cs` | Connection loop, phase state machine, phase executors, turnaround/continuous logic |
+| Orchestrator | `Core/Pilot/PilotEngine.cs` | Connection loop, phase state machine, phase executors, turnaround/continuous logic, operational logging |
+| Flight logging | `PilotEngine.Log` | GUI log + daily file `%LocalAppData%/AICopilotFS/pilot-yyyyMMdd.log` (rotated at ~60k lines); diagnostics ~5 s, waypoint captures, phase/traffic/terrain events — recurring telemetry is rate-limited |
 | GUI | `src/MSFS2024AIPilot.Gui` | Connect, mode select (Off / Single / Continuous), service time, engage/pause/disengage, telemetry, checklist, log |
 
 ## Control strategy
@@ -58,7 +59,10 @@ Hybrid, matching the previous design:
 
 - **Ground & precision phases** (taxi, takeoff roll, final approach, rollout): direct
   surface control via PID loops on `AXIS_ELEVATOR_SET`, `AXIS_AILERONS_SET`,
-  `AXIS_RUDDER_SET`, `THROTTLE_SET` (13-bit centred at ~8192).
+  `AXIS_RUDDER_SET`, `THROTTLE_SET` (13-bit centred at ~8192). Axis events are
+  deadbanded (~0.4% full-scale) so steady flight does not spam SimConnect; the
+  cache is re-synced by `Neutralize()`/mode switches so suppressed commands can
+  never leave stale surface state.
 - **Airborne enroute** (climb, cruise, descent): MSFS native autopilot
   (`AP_PANEL_HEADING_HOLD`, `AP_ALT_VAR_SET_ENGLISH`, `AP_SPD_VAR_SET`,
   `AP_NAV1_HOLD`, `AP_APR_HOLD`, `AUTO_THROTTLE_ARM`). Native-mode commands are
