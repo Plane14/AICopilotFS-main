@@ -57,6 +57,9 @@ public sealed class SimAircraft : IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        // A second connect while linked would re-register definitions, re-subscribe
+        // AircraftLoaded (EventIdDuplicate) and stack duplicate data handlers.
+        if (_sc.IsConnected) return;
         await _sc.ConnectAsync(cancellationToken: ct);
         SetupDataDefinitions();
         _sc.SubscribeToSystemEvent(EventAircraftLoaded, "AircraftLoaded");
@@ -323,9 +326,10 @@ public sealed class SimAircraft : IDisposable
         _reqAtcText = _sc.RequestData(_atcTextDefineId, period: Period.Second);
         _requestMap[_reqAtcText] = "ATCTEXT";
 
-        _sc.OnDataReceived += OnDataReceived;
-        _sc.OnStringDataReceived += OnStringDataReceived;
-        _sc.OnSystemState += OnSystemState;
+        // -= first: a reconnect re-runs this and would otherwise stack handlers.
+        _sc.OnDataReceived -= OnDataReceived; _sc.OnDataReceived += OnDataReceived;
+        _sc.OnStringDataReceived -= OnStringDataReceived; _sc.OnStringDataReceived += OnStringDataReceived;
+        _sc.OnSystemState -= OnSystemState; _sc.OnSystemState += OnSystemState;
     }
 
     private void OnSystemState(SystemStateData data)

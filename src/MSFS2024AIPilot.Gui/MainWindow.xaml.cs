@@ -37,6 +37,9 @@ public partial class MainWindow : Window
         // synchronously — a busy UI thread must never stall flight control.
         engine.OnStatusChanged += status => Dispatcher.BeginInvoke(() => ApplyStatus(status));
         engine.OnLog += msg => Dispatcher.BeginInvoke(() => AppendLog(msg));
+        // If the link drops, allow reconnecting.
+        engine.SimConnect.OnDisconnected += () =>
+            Dispatcher.BeginInvoke(() => { BtnConnect.IsEnabled = true; BtnConnect.Content = "Connect"; });
         return engine;
     }
 
@@ -49,13 +52,14 @@ public partial class MainWindow : Window
             TxtConnection.Text = "  ● connected";
             TxtConnection.Foreground = FindResource("GoodBrush") as System.Windows.Media.Brush;
             BtnConnect.Content = "Connected";
+            BtnConnect.IsEnabled = false; // a second connect duplicates event/data registration
         }
         catch (Exception ex)
         {
             AppendLog($"[GUI] Connect failed: {ex.Message}");
             TxtError.Text = ex.Message;
         }
-        finally { BtnConnect.IsEnabled = true; }
+        finally { if (Engine.SimConnect is not { IsConnected: true }) BtnConnect.IsEnabled = true; }
     }
 
     private void BtnEngage_Click(object sender, RoutedEventArgs e)

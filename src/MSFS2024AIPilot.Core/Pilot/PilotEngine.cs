@@ -149,6 +149,7 @@ public sealed class PilotEngine : IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        if (_aircraft.IsConnected) return;
         await _aircraft.ConnectAsync(ct);
         // Kick off the airport list so continuous mode can pick destinations.
         try { _planner.RequestAirportList(); } catch { }
@@ -832,6 +833,8 @@ public sealed class PilotEngine : IDisposable
         _taxiRoute = null;
         _taxiInPlanned = false;
         _pushbackProgress = new PushbackProgress { StartedUtc = DateTime.UtcNow };
+        _pushbackDismissed = false;
+        _pushbackToggleFired = false;
         _departureRunwayName = null;
         // Pick the runway first so the taxi route can hold short correctly.
         PlanDeparture(s);
@@ -1066,6 +1069,10 @@ public sealed class PilotEngine : IDisposable
     }
 
     private bool _pushbackDone;
+    private bool _pushbackDismissed;
+    private bool _pushbackToggleFired;
+    private DateTime _pushbackDismissUtc;
+    private static readonly TimeSpan PushbackDetachTimeout = TimeSpan.FromSeconds(20);
     private bool _taxiClearanceRequested;
     private bool _takeoffClearanceRequested;
     private DateTime _lastTaxiRequestUtc = DateTime.MinValue;
@@ -1131,11 +1138,35 @@ public sealed class PilotEngine : IDisposable
                 _ap.ParkingBrake(false);
                 break;
             case PushbackDecision.Dismiss:
-                // Release the tug and continue the taxi.
-                _aircraft.SimConnect.FireEvent("TUG_DISABLE");
+                if (!_pushbackDismissed)
+                {
+                    _pushbackDismissed = true;
+                    _pushbackDismissUtc = now;
+                    _pushbackProgress = _pushbackProgress with { Requested = false };
+                    if (s.Pushback.Attached)
+                    {
+                        _aircraft.SimConnect.FireEvent("TUG_DISABLE");
+                        Log("[Pilot] Pushback complete; releasing tug.");
+                    }
+                }
+                else if (s.Pushback.Attached)
+                {
+                    // The tug ignored TUG_DISABLE — escalate like the previous
+                    // pilot did instead of firing the event every tick.
+                    var waited = now - _pushbackDismissUtc;
+                    if (waited > PushbackDetachTimeout && !_pushbackToggleFired)
+                    {
+                        _pushbackToggleFired = true;
+                        _aircraft.SimConnect.FireEvent("TOGGLE_PUSHBACK");
+                        Log("[Pilot] Tug still attached; toggling pushback to release.");
+                    }
+                    if (waited > PushbackDetachTimeout * 3)
+                    {
+                        _pushbackDone = true;
+                        Log("[Pilot] Tug still attached; taxiing out anyway.");
+                    }
+                }
                 _ap.ParkingBrake(true);
-                _pushbackProgress = _pushbackProgress with { Requested = false };
-                Log("[Pilot] Pushback complete; releasing tug.");
                 break;
             case PushbackDecision.GiveUp:
                 _aircraft.SimConnect.FireEvent("TUG_DISABLE");
@@ -2146,6 +2177,8 @@ public sealed class PilotEngine : IDisposable
         _taxiRoute = null;
         _taxiInPlanned = false;
         _pushbackDone = false;
+        _pushbackDismissed = false;
+        _pushbackToggleFired = false;
         _taxiClearanceRequested = false;
         _takeoffClearanceRequested = false;
         _checklists.Reset(ChecklistPhase.Preflight);
