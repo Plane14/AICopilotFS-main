@@ -27,6 +27,11 @@ public sealed class SimConnectClient : IDisposable
     private uint _nextDefineId = 1;
     private uint _nextRequestId = 1;
     private readonly GCHandle _selfHandle;
+    // Signalled by the sim whenever SimConnect messages are pending. Passed to
+    // SimConnect_Open as hEventHandle; Dispatch only calls CallDispatch when it
+    // is signaled, because CallDispatch BLOCKS waiting for a message on MSFS —
+    // an empty queue used to freeze the whole control loop for 30 s+.
+    private readonly EventWaitHandle _msgEvent = new(false, EventResetMode.AutoReset);
 
     private SimConnectRecvDelegate? _recvDelegate;
     private int _quitReported;
@@ -77,7 +82,7 @@ public sealed class SimConnectClient : IDisposable
                 if (_connected) return;
                 try
                 {
-                    var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, IntPtr.Zero, 0);
+                    var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, _msgEvent.SafeWaitHandle.DangerousGetHandle(), 0);
                     if (hr != 0 || _handle == IntPtr.Zero)
                         throw new SimConnectException($"SimConnect_Open failed with HRESULT 0x{hr:X8}. Ensure Microsoft Flight Simulator 2024 is running.");
                     _connected = true;
@@ -158,16 +163,23 @@ public sealed class SimConnectClient : IDisposable
             {
                 if (!_connected || _handle != handle) return;
             }
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            long cbBefore = Interlocked.Read(ref _callbackTicks);
-            SimConnect_CallDispatch(handle, _recvDelegate, context);
-            sw.Stop();
-            // A multi-second pump is either the sim not delivering or our
-            // receive callback grinding — the callback-time delta tells which.
-            if (sw.ElapsedMilliseconds > 2000)
+            // CallDispatch blocks until a message arrives on MSFS — only call
+            // it while the sim says messages are pending, otherwise an idle
+            // sim (loading, paused, menu) freezes the control loop indefinitely.
+            var pumps = 0;
+            while (_msgEvent.WaitOne(0) && pumps++ < 500)
             {
-                var cbMs = TimeSpan.FromTicks(Interlocked.Read(ref _callbackTicks) - cbBefore).TotalMilliseconds;
-                OnError?.Invoke($"[SimConnect] dispatch pump took {sw.ElapsedMilliseconds} ms (receive callbacks {cbMs:F0} ms)");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                long cbBefore = Interlocked.Read(ref _callbackTicks);
+                SimConnect_CallDispatch(handle, _recvDelegate, context);
+                sw.Stop();
+                // A multi-second pump is either the sim not delivering or our
+                // receive callback grinding — the delta tells which.
+                if (sw.ElapsedMilliseconds > 2000)
+                {
+                    var cbMs = TimeSpan.FromTicks(Interlocked.Read(ref _callbackTicks) - cbBefore).TotalMilliseconds;
+                    OnError?.Invoke($"[SimConnect] dispatch pump took {sw.ElapsedMilliseconds} ms (receive callbacks {cbMs:F0} ms)");
+                }
             }
         }
         if (Interlocked.Exchange(ref _quitReported, 0) == 1) Disconnect();
@@ -639,6 +651,7 @@ public sealed class SimConnectClient : IDisposable
     public void Dispose()
     {
         Disconnect();
+        _msgEvent.Dispose();
         if (_selfHandle.IsAllocated) _selfHandle.Free();
         GC.SuppressFinalize(this);
     }
