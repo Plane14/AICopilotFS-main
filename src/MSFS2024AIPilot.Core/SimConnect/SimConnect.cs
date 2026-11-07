@@ -158,12 +158,31 @@ public sealed class SimConnectClient : IDisposable
             {
                 if (!_connected || _handle != handle) return;
             }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long cbBefore = Interlocked.Read(ref _callbackTicks);
             SimConnect_CallDispatch(handle, _recvDelegate, context);
+            sw.Stop();
+            // A multi-second pump is either the sim not delivering or our
+            // receive callback grinding — the callback-time delta tells which.
+            if (sw.ElapsedMilliseconds > 2000)
+            {
+                var cbMs = TimeSpan.FromTicks(Interlocked.Read(ref _callbackTicks) - cbBefore).TotalMilliseconds;
+                OnError?.Invoke($"[SimConnect] dispatch pump took {sw.ElapsedMilliseconds} ms (receive callbacks {cbMs:F0} ms)");
+            }
         }
         if (Interlocked.Exchange(ref _quitReported, 0) == 1) Disconnect();
     }
 
+    private static long _callbackTicks;
+
     private static void OnRecvNative(IntPtr pData, IntPtr cbData, IntPtr pContext)
+    {
+        var cbSw = System.Diagnostics.Stopwatch.StartNew();
+        try { OnRecvNativeCore(pData, cbData, pContext); }
+        finally { Interlocked.Add(ref _callbackTicks, cbSw.ElapsedTicks); }
+    }
+
+    private static void OnRecvNativeCore(IntPtr pData, IntPtr cbData, IntPtr pContext)
     {
         if (cbData == IntPtr.Zero || (int)cbData < Marshal.SizeOf<SIMCONNECT_RECV>()) return;
 
