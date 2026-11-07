@@ -194,6 +194,7 @@ public sealed class ChecklistManager
                 _queue.RemoveAt(0);
                 _index = 0;
                 _completed.Add(step);
+                OnLog?.Invoke($"[Checklist] {step} complete (0 items, missing from this set)");
                 continue;
             }
 

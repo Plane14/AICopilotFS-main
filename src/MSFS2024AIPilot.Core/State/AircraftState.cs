@@ -65,6 +65,8 @@ public sealed class AircraftState
     public bool StallWarning { get; set; }
     public bool OverspeedWarning { get; set; }
     public double BarberPoleKt { get; set; }
+    public double MachMaxOperate { get; set; }
+    public double BarberPoleMach { get; set; }
 
     // --- Engines & fuel ---
     public int EngineCount { get; set; }

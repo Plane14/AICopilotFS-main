@@ -121,18 +121,38 @@ public static class FlightChecklistProvider
         return best?.Slug;
     }
 
-    private static (string Name, string Slug)? MatchEntry(List<(string Name, string Slug)> index, string title)
+    internal static (string Name, string Slug)? MatchEntry(List<(string Name, string Slug)> index, string title)
     {
         var t = Normalize(title);
         if (t.Length == 0) return null;
+        // Payware/third-party titles rarely match the site name verbatim
+        // ("C172SP Classic Passengers" vs "Cessna 172 Skyhawk"), but they almost
+        // always carry the same model digits. A matching digit signature is
+        // strong evidence of the same airframe, so it earns a score floor.
+        var sig = DigitSignature(t);
         return index
-            .Select(e => (Entry: e, Score: Score(Normalize(e.Name), t)))
+            .Select(e =>
+            {
+                var name = Normalize(e.Name);
+                var score = Score(name, t);
+                if (sig.Count > 0 && DigitSignature(name).SetEquals(sig))
+                    score = Math.Max(score, 0.85);
+                return (Entry: e, Score: score);
+            })
             .Where(x => x.Score >= 0.5)
             .OrderByDescending(x => x.Score)
             .ThenBy(x => x.Entry.Name.Length)
             .Select(x => x.Entry)
             .FirstOrDefault();
     }
+
+    /// <summary>
+    /// The set of digit runs in a normalized name — the model identity
+    /// ("c172sp" → {172}, "737-800" → {737,800}). Compared as a set so
+    /// "ATR 72-600" does not match a query for "ATR 72".
+    /// </summary>
+    private static HashSet<string> DigitSignature(string normalized)
+        => new(Regex.Matches(normalized, @"\d+").Select(m => m.Value), StringComparer.Ordinal);
 
     /// Token-overlap score in [0,1]; numeric tokens count double because they
     /// carry the model identity ("172", "737", "A320").

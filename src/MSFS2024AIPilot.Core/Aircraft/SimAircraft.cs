@@ -21,7 +21,6 @@ public sealed class SimAircraft : IDisposable
     public const int MaxEngines = 4;
 
     private readonly SimConnectClient _sc;
-    private readonly SimulatorPathsConfig? _paths;
     private AircraftState _state = new();
     private readonly object _stateLock = new();
     private readonly Dictionary<uint, string> _requestMap = new();
@@ -50,7 +49,6 @@ public sealed class SimAircraft : IDisposable
 
     public SimAircraft(SimulatorPathsConfig? paths = null)
     {
-        _paths = paths;
         _sc = new SimConnectClient();
         _sc.OnError += msg => OnError?.Invoke(msg);
         _sc.OnDisconnected += () => OnError?.Invoke("SimConnect connection closed.");
@@ -408,10 +406,12 @@ public sealed class SimAircraft : IDisposable
                 {
                     _aircraftTitle = title;
                     titleChanged = true;
-                    OnAircraftTitleChanged?.Invoke(_aircraftTitle);
                 }
                 needsDir = string.IsNullOrWhiteSpace(_aircraftDirectory);
             }
+            // Subscribers publish status and queue identity loads — never run
+            // them under the state lock or a GetSnapshot caller can deadlock.
+            if (titleChanged) OnAircraftTitleChanged?.Invoke(_aircraftTitle);
             // Re-resolve on ANY title change, not just the first: swapping the
             // aircraft in-sim updates TITLE but leaves _aircraftDirectory
             // pointing at the previous package, which would keep stale
@@ -452,14 +452,14 @@ public sealed class SimAircraft : IDisposable
         // Runs on a worker thread (QueueIdentityWork): the locate scan and cfg
         // reads are too slow for the dispatch pump. Resolve first, then publish
         // under the state lock so GetSnapshot never observes a half update.
+        // Only the AircraftLoaded system-state path hint is used: it names the
+        // exact package directory, so resolution is a single File.Exists check.
+        // There is deliberately NO package scan — walking the VFS projection
+        // took ~100 s and stalled engine start; aircraft data comes from the
+        // bundled flightchecklist.app library keyed by the TITLE SimVar.
         string? resolvedDir = null;
         if (!string.IsNullOrWhiteSpace(dirHint))
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory("", dirHint, _paths);
-        string? currentTitle;
-        lock (_stateLock) currentTitle = _aircraftTitle;
-        var titleForScan = string.IsNullOrWhiteSpace(currentTitle) ? titleHint : currentTitle;
-        if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleForScan))
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleForScan, null, _paths);
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory("", dirHint);
 
         string? resolvedTitle = null;
         string? eventDir = null;
@@ -609,6 +609,8 @@ public sealed class SimAircraft : IDisposable
                     _state.StallWarning = D(8) > 0.5;
                     _state.OverspeedWarning = D(9) > 0.5;
                     _state.BarberPoleKt = D(10);
+                    _state.MachMaxOperate = D(11);
+                    _state.BarberPoleMach = D(12);
                     break;
                 case "APMODES":
                     _state.Autopilot.FlightDirector = D(0) > 0.5;

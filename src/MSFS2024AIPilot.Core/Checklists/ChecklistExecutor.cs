@@ -20,7 +20,7 @@ public sealed class ChecklistExecutorOptions
     public double FireIntervalSeconds = 0.4;
     public double ItemTimeoutSeconds = 150;
     public int MaxFiresPerItem = 60;
-    public double ManualSettleSeconds = 1.5;
+    public double ManualSettleSeconds = 0.5;
     public double MinDwellSeconds = 0.75;
     public double WaitForUserTimeoutSeconds = 90;
 }

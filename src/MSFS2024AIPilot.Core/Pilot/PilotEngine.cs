@@ -750,15 +750,27 @@ public sealed class PilotEngine : IDisposable
         _ap.SetDirectMode(true);
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
         // Wait for the gate checklists (pushback + gate), then advance.
-        if (!_checklists.IsLoaded ||
-            (_checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE) &&
-             _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK)))
+        var gateDone = _checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE);
+        var pushDone = _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK);
+        if (!_checklists.IsLoaded || (gateDone && pushDone))
             SetPhase(FlightPhase.Startup);
     }
 
     private DateTime _starterAttemptUtc = DateTime.MinValue;
     private int _starterAttempts;
     private bool _turbineStartersHeld;
+
+    /// <summary>
+    /// Fires a lever SET event in both its unindexed and per-engine forms —
+    /// aircraft bind one or the other, and a SET payload is absolute so firing
+    /// the family cannot flip state. Unknown event names are reported by
+    /// SimConnect and skipped.
+    /// </summary>
+    private void FireLever(string unindexed, string indexed, uint payload)
+    {
+        try { _aircraft.SimConnect.FireEvent(unindexed, payload); } catch { }
+        try { _aircraft.SimConnect.FireEvent(indexed, payload); } catch { }
+    }
 
     /// <summary>Releases SET_STARTERn_HELD once, after light-off or when giving up.</summary>
     private void ReleaseHeldStarters(AircraftState s)
@@ -791,19 +803,29 @@ public sealed class PilotEngine : IDisposable
                     // NUMBER OF ENGINES can under-report on some add-on aircraft;
                     // the package cfg (icao_engine_count) is the fallback floor.
                     var engines = Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4);
-                    // STARTERn_SET is idempotent (starter on); TOGGLE_STARTERn
-                    // would switch a running starter back off on the next retry.
-                    // Turbine engines need SET_STARTERn_HELD as well to keep the
-                    // starter engaged through light-off.
+                    // Prefer the simulator's built-in auto-start: it handles magnetos,
+                    // fuel, starter and mixture for every aircraft model, including
+                    // the Asobo C172 where STARTERn_SET alone never cranks.
+                    _aircraft.SimConnect.FireEvent("ENGINE_AUTO_START");
+                    // Also drive the per-engine starter as a fallback for aircraft
+                    // that do not bind ENGINE_AUTO_START.
                     var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
                                   _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase);
                     for (int e = 1; e <= engines; e++)
                     {
-                        _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
                         if (turbine)
                         {
+                            _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
                             _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 1);
                             _turbineStartersHeld = true;
+                        }
+                        else
+                        {
+                            _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
+                            _aircraft.SimConnect.FireEvent($"MAGNETO{e}_START");
+                            _aircraft.SimConnect.FireEvent($"MAGNETO{e}_SET", 4);
+                            FireLever($"MIXTURE_SET", $"MIXTURE{e}_SET", 16383);
+                            FireLever($"THROTTLE_SET", $"THROTTLE{e}_SET", 2458); // ~15%
                         }
                     }
                     _starterAttemptUtc = now;
@@ -2236,7 +2258,8 @@ public sealed class PilotEngine : IDisposable
                 if (ContinuousEnabled)
                 {
                     await TryPlanNextLegAsync(CancellationToken.None);
-                    if (_route is not null) SetPhase(FlightPhase.Preflight);
+if (_route is not null && (_status.Phase is FlightPhase.Preflight or FlightPhase.Unknown))
+            SetPhase(FlightPhase.Preflight);
                 }
             }
             catch (Exception ex) { Log($"[Pilot] Next-leg planning failed: {ex.Message}"); }
@@ -2245,16 +2268,66 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Aircraft identity / performance ----------------
 
+    private readonly object _identityLock = new();
+    private int _webIdentityQueued;
+
     private void OnTitleChanged(string title)
     {
         lock (_lock) { _status.AircraftTitle = title; }
         PublishStatus();
+        // No package directory resolved (the AircraftLoaded hint never arrived
+        // or points nowhere usable): the TITLE SimVar plus the bundled
+        // flightchecklist.app library are the whole identity. Load specs and
+        // checklists from the web data on a worker thread — bundled hits are
+        // instant, a live fetch can take seconds and must not stall the loop.
+        if (string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory))
+            QueueWebIdentity(title);
+    }
+
+    private void QueueWebIdentity(string title)
+    {
+        if (Interlocked.Exchange(ref _webIdentityQueued, 1) == 1) return;
+        _ = Task.Run(() =>
+        {
+            try { LoadWebIdentity(title); }
+            catch (Exception ex) { Log($"[Pilot] Web identity load failed: {ex.Message}"); }
+            finally { Interlocked.Exchange(ref _webIdentityQueued, 0); }
+        });
+    }
+
+    /// <summary>
+    /// Title-driven identity for aircraft whose package directory never
+    /// resolved: performance and checklists come from flightchecklist.app
+    /// (bundled copy first), kind detection uses title keywords + web type.
+    /// </summary>
+    private void LoadWebIdentity(string title)
+    {
+        lock (_identityLock)
+        {
+            // A package directory may have resolved while this was queued;
+            // the cfg path is authoritative when it exists.
+            if (!string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory)) return;
+            _performance = new AircraftPerformance();
+            LoadChecklists();
+            _aircraftKind = AircraftKindDetector.Detect(null, title, _performance);
+            _planner.Kind = _aircraftKind;
+            if (_aircraftKind == AircraftKind.Rotorcraft)
+            {
+                _planner.RequiredRunwayMeters = 0;
+                _planner.MinRangeNm = 10;
+            }
+            lock (_lock) _status.AircraftKind = _aircraftKind;
+            Log($"[Pilot] Aircraft: {title} — {_aircraftKind} (flightchecklist.app, no package cfg)");
+            PublishStatus();
+        }
     }
 
     private void OnAircraftDirectoryChanged(string dir)
     {
-        try
+        lock (_identityLock)
         {
+            try
+            {
             _performance = AircraftConfigParser.ParseAircraftConfig(dir);
             LoadChecklists();
             _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
@@ -2280,8 +2353,9 @@ public sealed class PilotEngine : IDisposable
                 Log($"[Pilot] {_aircraftKind}: water runways preferred for all legs.");
             }
             PublishStatus();
+            }
+            catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
         }
-        catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
     }
 
     /// <summary>

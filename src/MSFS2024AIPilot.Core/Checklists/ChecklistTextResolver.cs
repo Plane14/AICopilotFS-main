@@ -487,7 +487,7 @@ public static class ChecklistTextResolver
             var e when e.Contains("LEFT") => 1,
             var e when e.Contains("RIGHT") => 2,
             var e when e.Contains("BOTH") => 3,
-            var e when e.Contains("START") => 3,
+            var e when e.Contains("START") => 4,
             _ => 3
         };
         cmd.Events.Add(("MAGNETO1_SET", state));

@@ -29,10 +29,14 @@ public static class ChecklistParser
     {
         options ??= new Options();
         var set = new AircraftChecklistSet { AircraftTitle = title };
+        // No package scan: the only accepted source is the already-resolved
+        // aircraft directory (AircraftLoaded path hint). Everything else comes
+        // from the bundled flightchecklist.app library. LocateAircraftDirectory
+        // only normalizes the override (file path -> dir, package check).
         var dir = AircraftPackageLocator.LocateAircraftDirectory(title, rootOverride);
         if (dir == null)
         {
-            set.Notes.Add("aircraft package folder not found in Community");
+            set.Notes.Add("no aircraft package directory resolved");
             return set;
         }
 

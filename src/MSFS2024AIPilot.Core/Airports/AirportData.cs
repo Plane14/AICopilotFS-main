@@ -134,8 +134,8 @@ public sealed class RunwayInfo
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
         var normalized = name.Trim().ToUpperInvariant();
-        if (PrimaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return PrimaryEnd;
-        if (SecondaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return SecondaryEnd;
+        if (PrimaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return PrimaryThreshold ?? PrimaryEnd;
+        if (SecondaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return SecondaryThreshold ?? SecondaryEnd;
         return null;
     }
 

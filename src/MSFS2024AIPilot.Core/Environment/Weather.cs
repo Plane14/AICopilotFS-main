@@ -85,7 +85,7 @@ public static class WeatherModel
     public static bool IcingConditions(double oatC, bool inCloud, double precipState, double structuralIcePercent)
     {
         if (structuralIcePercent > IcePerceptionThreshold) return true;
-        var moist = inCloud || precipState != 0;
+        var moist = inCloud || (((int)Math.Round(precipState)) & 12) != 0;
         return moist && oatC <= IcingUpperTempC && oatC >= IcingLowerTempC;
     }
 

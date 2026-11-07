@@ -103,4 +103,29 @@ public class FlightChecklistProviderTests
         Assert.Equal(0, sparse.MaxRangeNm);
         Assert.Null(FlightChecklistProvider.BuildPerformance(null, null, null, null, null, null));
     }
+
+    [Fact]
+    public void MatchEntry_matches_payware_subvariant_by_model_digits()
+    {
+        var index = new List<(string Name, string Slug)>
+        {
+            ("Cessna 172 Skyhawk", "cessna-172"),
+            ("Cessna 152", "cessna-152"),
+            ("Cirrus SR22", "cirrus-sr22"),
+        };
+
+        // "C172SP Classic Passengers" shares no word tokens with the site
+        // name, but its digit signature {172} identifies the airframe.
+        var hit = FlightChecklistProvider.MatchEntry(index, "C172SP Classic Passengers");
+        Assert.NotNull(hit);
+        Assert.Equal("cessna-172", hit!.Value.Slug);
+
+        // Exact-name titles still match.
+        Assert.Equal("cirrus-sr22",
+            FlightChecklistProvider.MatchEntry(index, "Cirrus SR22 G6")!.Value.Slug);
+
+        // A different model must not steal the match.
+        Assert.Equal("cessna-152",
+            FlightChecklistProvider.MatchEntry(index, "C152")!.Value.Slug);
+    }
 }

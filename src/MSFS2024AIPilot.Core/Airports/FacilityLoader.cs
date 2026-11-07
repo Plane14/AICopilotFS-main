@@ -438,9 +438,12 @@ public sealed class AirportFacilityLoader : IDisposable
 
             var start = airport.FindNode(p.Start);
             var end = airport.FindNode(p.End);
-            if (end is null && p.Type == (int)TaxiPathType.Parking)
+            if (p.Type == (int)TaxiPathType.Parking)
             {
-                var parking = req.RawTaxiParking.FirstOrDefault(pk => pk.Index == p.End);
+                // For PARKING paths END indexes the parking list, not the taxi
+                // point table. Resolve by list position (0- or 1-based) first,
+                // falling back to a direct taxi-point index match.
+                var parking = ResolveParkingByIndex(req.RawTaxiParking, p.End);
                 if (parking is not null && airport.Nodes.TryGetValue(parking.Index, out var parkingNode))
                     end = parkingNode;
             }
@@ -469,7 +472,14 @@ public sealed class AirportFacilityLoader : IDisposable
         airport.PathResolutionRatio = usable == 0 ? 0 : (double)resolvable / usable;
     }
 
-    private static GroundEdge MakeEdge(RawTaxiPath p, int from, int to, double length) => new()
+    private static RawTaxiParking? ResolveParkingByIndex(List<RawTaxiParking> list, int index)
+    {
+        if (list.Count == 0) return null;
+        if (index >= 0 && index < list.Count) return list[index];
+        if (index >= 1 && index <= list.Count) return list[index - 1];
+        return list.FirstOrDefault(pk => pk.Index == index);
+    }
+private static GroundEdge MakeEdge(RawTaxiPath p, int from, int to, double length) => new()
     {
         From = from,
         To = to,
