@@ -58,6 +58,7 @@ public sealed class AircraftState
     // --- Ground / configuration ---
     public bool OnGround { get; set; }
     public bool GearDown { get; set; }
+    public bool GearIsFloats { get; set; }        // true when the aircraft's floats are deployed (amphibians)
     public bool ParkingBrakeSet { get; set; }
     public double FlapsHandleIndex { get; set; }
     public double FlapsPosition { get; set; }     // degrees

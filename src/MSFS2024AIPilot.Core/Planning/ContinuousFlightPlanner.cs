@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.Airports;
 using MSFS2024AIPilot.Core.Geo;
 using MSFS2024AIPilot.Core.SimConnect;
@@ -31,6 +32,8 @@ public sealed class ContinuousFlightPlanner
     public double RequiredRunwayMeters { get; set; } = 800;
     /// <summary>Exclude the current airport from selection.</summary>
     public string? ExcludeIcao { get; set; }
+    /// <summary>Operational class of the aircraft — filters destination suitability.</summary>
+    public AircraftKind Kind { get; set; } = AircraftKind.Airplane;
 
     public IReadOnlyList<string> KnownAirports { get { lock (_lock) return _airportIcaos.ToList(); } }
 
@@ -112,7 +115,8 @@ public sealed class ContinuousFlightPlanner
     /// </summary>
     public async Task<AirportData?> PickDestinationAsync(
         double lat, double lon, double aircraftRangeNm,
-        TimeSpan timeout, CancellationToken ct = default)
+        TimeSpan timeout, CancellationToken ct = default,
+        AircraftKind? kind = null)
     {
         var range = MaxRangeNm > 0 ? Math.Min(MaxRangeNm, aircraftRangeNm) : aircraftRangeNm;
         if (range <= 0) range = 400;
@@ -142,6 +146,7 @@ public sealed class ContinuousFlightPlanner
             inRange.AddRange(candidates.Select(c => (c, -1.0)));
         }
 
+        var effectiveKind = kind ?? Kind;
         var rng = new Random();
         var shuffled = inRange.OrderBy(_ => rng.Next()).ToList();
         var tried = 0;
@@ -156,7 +161,7 @@ public sealed class ContinuousFlightPlanner
             {
                 var cd = GeoMath.DistanceNm(lat, lon, cached.ReferenceLatitude, cached.ReferenceLongitude);
                 if (cd < MinRangeNm || cd > range) continue;
-                if (IsSuitable(cached)) return cached;
+                if (IsSuitable(cached, effectiveKind)) return cached;
                 continue;
             }
 
@@ -168,7 +173,7 @@ public sealed class ContinuousFlightPlanner
             var dist = knownDist >= 0 ? knownDist
                 : GeoMath.DistanceNm(lat, lon, airport.ReferenceLatitude, airport.ReferenceLongitude);
             if (dist < MinRangeNm || dist > range) continue;
-            if (IsSuitable(airport)) return airport;
+            if (IsSuitable(airport, effectiveKind)) return airport;
         }
         return null;
     }
@@ -191,25 +196,40 @@ public sealed class ContinuousFlightPlanner
         }
     }
 
-    /// <summary>True when the airport can take the aircraft: open, with a runway long enough.</summary>
-    public bool IsSuitable(AirportData airport)
+    /// <summary>
+    /// True when the airport can take the aircraft: rotorcraft need any open
+    /// airport/helipad (no runway-length requirement); floatplanes need a water
+    /// runway; amphibians and landplanes need a runway long enough.
+    /// </summary>
+    public bool IsSuitable(AirportData airport, AircraftKind? kind = null)
     {
-        if (airport.IsClosed || airport.Runways.Count == 0) return false;
+        var k = kind ?? Kind;
+        if (airport.IsClosed) return false;
+        if (k == AircraftKind.Rotorcraft) return true; // airports/helipads, no runway needed
+        if (k == AircraftKind.Seaplane) return airport.HasWaterRunway;
+        if (!airport.HasRunways) return false;
+
         // Prefer airports with at least one runway meeting the required length.
         foreach (var rw in airport.Runways)
         {
             if (rw.PrimaryClosed && rw.SecondaryClosed) continue;
-            var longest = Math.Max(rw.LengthMeters, 0);
             // A runway record's LengthMeters is the full strip length.
-            if (longest >= RequiredRunwayMeters) return true;
+            if (rw.LengthMeters >= RequiredRunwayMeters) return true;
         }
         // Accept if the best runway is at least 60% of required (short-field capable aircraft).
         var best = airport.Runways.Select(r => r.LengthMeters).DefaultIfEmpty(0).Max();
         return best >= RequiredRunwayMeters * 0.6;
     }
 
-    /// <summary>Picks a runway at an airport: longest suitable one, favouring into-wind.</summary>
-    public static (RunwayInfo runway, string name)? PickRunway(AirportData airport, double windDirectionDeg, double requiredMeters)
+    /// <summary>
+    /// Picks a runway at an airport: longest suitable one, favouring into-wind.
+    /// <paramref name="waterOnly"/> restricts candidates to water runways
+    /// (pure floatplanes); <paramref name="preferWater"/> scores water runways
+    /// higher but still allows land runways (amphibians).
+    /// </summary>
+    public static (RunwayInfo runway, string name)? PickRunway(
+        AirportData airport, double windDirectionDeg, double requiredMeters,
+        bool waterOnly = false, bool preferWater = false)
     {
         RunwayInfo? best = null;
         string? bestName = null;
@@ -217,6 +237,8 @@ public sealed class ContinuousFlightPlanner
 
         foreach (var rw in airport.Runways)
         {
+            if (waterOnly && !rw.IsWater) continue;
+            var waterBonus = preferWater && rw.IsWater ? requiredMeters * 0.5 : 0;
             foreach (var (name, closed) in new[] { (rw.PrimaryName, rw.PrimaryClosed), (rw.SecondaryName, rw.SecondaryClosed) })
             {
                 if (string.IsNullOrEmpty(name) || closed) continue;
@@ -225,7 +247,7 @@ public sealed class ContinuousFlightPlanner
                 if (threshold is null) continue;
                 // Prefer runways whose landing/takeoff heading has a headwind component.
                 var windAngle = GeoMath.AngleDelta(windDirectionDeg, rw.HeadingDegTrue);
-                var score = rw.LengthMeters - Math.Abs(GeoMath.AngleDelta(windAngle, 0)) * 5;
+                var score = rw.LengthMeters + waterBonus - Math.Abs(GeoMath.AngleDelta(windAngle, 0)) * 5;
                 if (score > bestScore)
                 {
                     bestScore = score;

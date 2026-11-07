@@ -15,6 +15,7 @@ using MSFS2024AIPilot.Core.Paths;
 using MSFS2024AIPilot.Core.Planning;
 using MSFS2024AIPilot.Core.SimConnect;
 using MSFS2024AIPilot.Core.State;
+using MSFS2024AIPilot.Core.Terrain;
 using MSFS2024AIPilot.Core.Traffic;
 
 namespace MSFS2024AIPilot.Core.Pilot;
@@ -36,6 +37,7 @@ public sealed class PilotStatus
     public FlightPhase Phase { get; set; } = FlightPhase.Unknown;
     public string StatusText { get; set; } = "Disconnected";
     public string AircraftTitle { get; set; } = "";
+    public AircraftKind AircraftKind { get; set; } = AircraftKind.Airplane;
     public string DepartureIcao { get; set; } = "";
     public string DestinationIcao { get; set; } = "";
     public string DepartureRunway { get; set; } = "";
@@ -77,6 +79,18 @@ public sealed class PilotEngine : IDisposable
     private DateTime _lastTrafficLogUtc = DateTime.MinValue;
     private bool _goAroundForTraffic;
     private DateTime _lastLegRetryUtc = DateTime.MinValue;
+
+    // Terrain awareness + aircraft class
+    private readonly TerrainElevations _terrainElevations = new();
+    private TerrainProfile? _terrainProfile;
+    private AircraftKind _aircraftKind = AircraftKind.Airplane;
+    private readonly Racetrack _racetrack = new();
+    private bool _racetrackActive;
+    private DateTime _racetrackSinceUtc;
+    private double _racetrackHeadingDeg;
+    private double _racetrackTargetAltFt;
+    private double _terrainRaiseLoggedFt;
+    private bool _gearFloatsObserved;
 
     private readonly object _lock = new();
     private PilotStatus _status = new();
@@ -170,6 +184,7 @@ public sealed class PilotEngine : IDisposable
             CruiseAltitudeFt = nav.CruiseAltitudeFt > 0 ? nav.CruiseAltitudeFt : ChooseCruiseAltitude(s),
         };
         _route.Waypoints.AddRange(wps);
+        await AnalyzeTerrainAsync(s, ct);
         _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
         _nav.Reset();
         _goAroundForTraffic = false;
@@ -317,6 +332,17 @@ public sealed class PilotEngine : IDisposable
         _trafficAssessment = _traffic.Assess(s, TrafficRunwayFor(s));
         PublishTrafficStatus();
 
+        // Runtime amphibian detection: the sim reports IS GEAR FLOATS once an
+        // amphibian's floats are deployed — upgrade a plain Airplane accordingly.
+        if (s.GearIsFloats && _aircraftKind == AircraftKind.Airplane && !_gearFloatsObserved)
+        {
+            _gearFloatsObserved = true;
+            _aircraftKind = AircraftKindDetector.ObserveGearFloats(_aircraftKind);
+            _planner.Kind = _aircraftKind;
+            lock (_lock) _status.AircraftKind = _aircraftKind;
+            Log($"[Pilot] Floats detected — aircraft classified as {_aircraftKind}.");
+        }
+
         // Feed weather/turbulence into envelope limits.
         _limits.MaxAirspeedKt = s.BarberPoleKt > 0 ? s.BarberPoleKt : 0;
         _limits.MinAirspeedKt = s.StallWarning ? s.IndicatedAirspeed * 0.9 : VsEstimate(s);
@@ -433,11 +459,17 @@ public sealed class PilotEngine : IDisposable
                 break;
 
             case FlightPhase.Takeoff:
-                if (!s.OnGround) { SetPhase(FlightPhase.InitialClimb); _nav.Reset(); }
+                // Rotorcraft transitions on height above ground (SIM ON GROUND
+                // flickers during the initial hover); fixed-wing on liftoff.
+                if (_aircraftKind == AircraftKind.Rotorcraft
+                    ? s.AltitudeAGL > 80
+                    : !s.OnGround) { SetPhase(FlightPhase.InitialClimb); _nav.Reset(); }
                 break;
 
             case FlightPhase.InitialClimb:
-                if (s.AltitudeAGL > 1000 || s.Altitude > _targetCruiseAltitudeFt * 0.4)
+                if (_aircraftKind == AircraftKind.Rotorcraft
+                    ? s.AltitudeAGL > 400 || s.Altitude > _targetCruiseAltitudeFt - 200
+                    : s.AltitudeAGL > 1000 || s.Altitude > _targetCruiseAltitudeFt * 0.4)
                     SetPhase(FlightPhase.Climb);
                 break;
 
@@ -477,7 +509,16 @@ public sealed class PilotEngine : IDisposable
                 break;
 
             case FlightPhase.Rollout:
-                if (s.GroundSpeed < 5) SetPhase(FlightPhase.TaxiIn);
+                if (s.GroundSpeed < 5)
+                {
+                    // Rotorcraft set down vertically — no taxi-in phase.
+                    if (_aircraftKind == AircraftKind.Rotorcraft)
+                    {
+                        if (_status.Mode == PilotMode.Continuous) BeginTurnaround(s);
+                        else SetPhase(FlightPhase.Shutdown);
+                    }
+                    else SetPhase(FlightPhase.TaxiIn);
+                }
                 break;
 
             case FlightPhase.TaxiIn:
@@ -653,10 +694,19 @@ public sealed class PilotEngine : IDisposable
                 }
                 return;
             }
-            // Request IFR clearance / flight following before taxi.
+            // Request IFR clearance / flight following before departure.
             _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight", MenuLinesFor(AtcRequestKind.IfreClearance));
-            SetPhase(FlightPhase.TaxiOut);
-            BeginTaxiOut(s);
+            if (_aircraftKind == AircraftKind.Rotorcraft)
+            {
+                // No taxi, no pushback, no runway — lift off in place.
+                SetPhase(FlightPhase.Takeoff);
+                _ap.ParkingBrake(false);
+            }
+            else
+            {
+                SetPhase(FlightPhase.TaxiOut);
+                BeginTaxiOut(s);
+            }
         }
     }
 
@@ -686,9 +736,12 @@ public sealed class PilotEngine : IDisposable
         if (DateTime.UtcNow - _lastDeparturePlanUtc < TimeSpan.FromSeconds(5)) return;
         _lastDeparturePlanUtc = DateTime.UtcNow;
 
-        // Choose the runway: into the wind, long enough for takeoff.
+        // Choose the runway: into the wind, long enough for takeoff. Water
+        // kinds prefer (or require) water runways.
         var pick = ContinuousFlightPlanner.PickRunway(_departureAirport, s.WindDirection,
-            _takeoffRunMeters(s));
+            _takeoffRunMeters(s),
+            waterOnly: _aircraftKind == AircraftKind.Seaplane,
+            preferWater: _aircraftKind == AircraftKind.Amphibian);
         if (pick is null) { Log("[Pilot] No suitable departure runway found."); return; }
         var (rw, name) = pick.Value;
         _departureRunwayName = name;
@@ -741,6 +794,17 @@ public sealed class PilotEngine : IDisposable
     private void ExecuteTaxiOut(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
+
+        // Water operations: a floatplane/amphibian on a water runway has no
+        // ground graph — no pushback, no taxi. Line up on the water and go.
+        if (DepartureOnWater())
+        {
+            _pushbackDone = true;
+            _taxiClearanceRequested = true; // seaplane bases are normally untowered
+            t.GearDown = false; // amphibians: wheels up before the water roll
+            LineUpAndTakeoff(s, t);
+            return;
+        }
 
         // Pushback first if the stand offers it and it hasn't been done.
         if (s.Pushback.Available && !s.Pushback.Attached && !_pushbackDone)
@@ -851,6 +915,25 @@ public sealed class PilotEngine : IDisposable
     private bool _taxiClearanceRequested;
     private bool _takeoffClearanceRequested;
 
+    /// <summary>True when departing an airport on a water runway (float/amphib).</summary>
+    private bool DepartureOnWater()
+    {
+        if (!AircraftKindDetector.IsWaterKind(_aircraftKind)) return false;
+        if (_departureAirport is null || _departureRunwayName is null) return false;
+        return _departureAirport.FindRunway(_departureRunwayName)?.IsWater == true;
+    }
+
+    /// <summary>True when the arrival runway is water — gear stays up.</summary>
+    private bool ArrivalOnWater()
+    {
+        if (!AircraftKindDetector.IsWaterKind(_aircraftKind)) return false;
+        if (_destinationAirport is null || _arrivalRunwayName is null) return false;
+        return _destinationAirport.FindRunway(_arrivalRunwayName)?.IsWater == true;
+    }
+
+    /// <summary>Whether the landing gear should be extended for the arrival.</summary>
+    private bool ArrivalNeedsGear() => !ArrivalOnWater();
+
     private void ExecutePushback(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
@@ -936,6 +1019,11 @@ public sealed class PilotEngine : IDisposable
 
     private void ExecuteTakeoff(AircraftState s, ControlTargets t)
     {
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            ExecuteRotorcraftTakeoff(s, t);
+            return;
+        }
         _ap.SetDirectMode(true);
         var perf = _performance;
         var vr = perf.RotationSpeed > 0 ? perf.RotationSpeed : Math.Max(VsEstimate(s) * 1.15, 55);
@@ -947,7 +1035,9 @@ public sealed class PilotEngine : IDisposable
         t.TargetAirspeedKt = vy;
         t.ThrottleFraction = 1.0;
 
-        if (!s.GearDown && s.AltitudeAGL > 400) t.GearDown = false;
+        // Amphibians go wheels-up for a water departure; land arrivals keep gear.
+        if (DepartureOnWater() || (s.GearDown && s.AltitudeAGL > 400 && ArrivalNeedsGear()))
+            t.GearDown = false;
         if (s.FlapsHandleIndex > 0 && s.AltitudeAGL > 800) t.FlapIndex = 0;
 
         // Rotate: hold a gentle pitch-up once at Vr.
@@ -970,6 +1060,19 @@ public sealed class PilotEngine : IDisposable
 
     private void ExecuteEnroute(AircraftState s, ControlTargets t, TurbulenceLevel turbulence)
     {
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            ExecuteRotorcraftEnroute(s, t);
+            return;
+        }
+
+        // Active racetrack (valley departure / mountain arrival) takes over.
+        if (_racetrackActive || ShouldEnterRacetrack(s))
+        {
+            ExecuteRacetrack(s, t);
+            return;
+        }
+
         _ap.SetDirectMode(false); // native autopilot enroute
         _ap.ApMaster(true);
 
@@ -1004,11 +1107,249 @@ public sealed class PilotEngine : IDisposable
             t.TargetAirspeedKt = cruiseSpeedKt();
         }
 
-        // Gear: retract once comfortably airborne, re-extend on short final.
-        // (Previously this only ever commanded gear DOWN below 3500 ft AGL, so
-        // the gear stayed down for the whole flight.)
-        if (s.AltitudeAGL > 2500) t.GearDown = false;
+        // In-flight terrain check: terrain within the next ~12 NM may demand a
+        // higher altitude than the current target — climb early.
+        ApplyTerrainClearance(s, t, aheadNm: 12);
+
+        // Gear: retract once comfortably airborne, re-extend on short final —
+        // but never for a water arrival (floatplanes/amphibians wheels-up).
+        if (!ArrivalNeedsGear()) t.GearDown = false;
+        else if (s.AltitudeAGL > 2500) t.GearDown = false;
         else if (s.AltitudeAGL < 600) t.GearDown = true;
+    }
+
+    // ----- Rotorcraft -----
+
+    /// <summary>Transit altitude for rotorcraft: 500 ft AGL short legs, 1,000 ft longer.</summary>
+    private double RotorcraftTransitAltitudeFt(AircraftState s)
+    {
+        var fieldElevFt = Math.Max(
+            _departureAirport?.ReferenceAltitudeMeters ?? 0,
+            _destinationAirport?.ReferenceAltitudeMeters ?? 0) * GeoMath.FeetPerMeter;
+        var dist = _route?.TotalDistanceNm ?? 0;
+        return fieldElevFt + (dist < 15 ? 500 : 1000);
+    }
+
+    private void ExecuteRotorcraftTakeoff(AircraftState s, ControlTargets t)
+    {
+        _ap.SetDirectMode(true);
+        var transit = RotorcraftTransitAltitudeFt(s);
+        t.TargetAltitudeFt = transit;
+        t.TargetVsFpm = s.AltitudeAGL < 60 ? 800 : null;
+        t.TargetAirspeedKt = null; // hover climb — throttle fraction drives it
+        t.ThrottleFraction = 0.75;
+        t.TargetHeadingDeg = InitialHeadingTowardRoute(s);
+        t.GearDown = false;
+        if (s.AltitudeAGL > 60) t.TargetVsFpm = null;
+        if (s.Altitude >= transit - 100) t.TargetVsFpm = 0;
+    }
+
+    private double? InitialHeadingTowardRoute(AircraftState s)
+    {
+        var next = _routeNav?.Waypoints
+            .Skip(_routeNav.CurrentWaypointIndex)
+            .FirstOrDefault(w => w.HasPosition && GeoMath.DistanceNm(s.Latitude, s.Longitude, w.Latitude, w.Longitude) > 0.2);
+        if (next is not null)
+            return GeoMath.BearingDeg(s.Latitude, s.Longitude, next.Latitude, next.Longitude);
+        return _destinationAirport is not null
+            ? GeoMath.BearingDeg(s.Latitude, s.Longitude,
+                _destinationAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude)
+            : (double?)null;
+    }
+
+    private void ExecuteRotorcraftEnroute(AircraftState s, ControlTargets t)
+    {
+        _ap.SetDirectMode(true); // direct surface control at low level
+
+        var transit = _route?.CruiseAltitudeFt ?? RotorcraftTransitAltitudeFt(s);
+        t.TargetAltitudeFt = transit;
+
+        // Terrain: rotorcraft keep ~800 ft above the highest ground ahead;
+        // when the climb can't keep up, slow to ~25 kt (aerotto-style).
+        var aheadNm = 8.0;
+        var terrainReq = _terrainProfile?.RequiredAheadFt(s.Latitude, s.Longitude, aheadNm) ?? 0;
+        if (terrainReq > 0)
+        {
+            var need = terrainReq + 300; // rotorcraft margin over the profile floor
+            if (need > t.TargetAltitudeFt)
+            {
+                if (need > _terrainRaiseLoggedFt + 200)
+                {
+                    _terrainRaiseLoggedFt = need;
+                    Log($"[Pilot] Terrain ahead requires {need:F0} ft — adjusting.");
+                }
+                t.TargetAltitudeFt = need;
+            }
+            // Can the aircraft reach it? Estimate climb over the ahead window.
+            var climbFpm = _performance.ClimbRateFpm > 0 ? _performance.ClimbRateFpm : 1200;
+            var gs = Math.Max(s.GroundSpeed, 25);
+            var etaMin = aheadNm / gs * 60.0;
+            var reachable = s.Altitude + climbFpm * etaMin;
+            t.TargetAirspeedKt = need > reachable ? 25 : Math.Min(cruiseSpeedKt(), 90);
+        }
+        else
+        {
+            t.TargetAirspeedKt = Math.Min(cruiseSpeedKt(), 90);
+        }
+
+        if (_route is not null && _routeNav is not null && _route.Waypoints.Count > 0)
+        {
+            var (_, heading, _) = _nav.Update(s, _routeNav);
+            t.TargetHeadingDeg = heading;
+            t.TrackNav = true;
+        }
+        else
+        {
+            t.TargetHeadingDeg = InitialHeadingTowardRoute(s) ?? s.TrueHeading;
+        }
+        t.ThrottleFraction = 0.55; // PID trims around this for the speed target
+    }
+
+    // ----- Terrain avoidance -----
+
+    /// <summary>
+    /// Raises the target altitude when terrain within <paramref name="aheadNm"/>
+    /// demands more than the current target (in-flight look-ahead).
+    /// </summary>
+    private void ApplyTerrainClearance(AircraftState s, ControlTargets t, double aheadNm)
+    {
+        var p = _terrainProfile;
+        if (p is null || t.TargetAltitudeFt is null) return;
+        var req = p.RequiredAheadFt(s.Latitude, s.Longitude, aheadNm);
+        if (req <= 0) return;
+        var need = req + (_aircraftKind == AircraftKind.Rotorcraft ? 300 : 0);
+        if (need <= t.TargetAltitudeFt.Value) return;
+        if (need > _terrainRaiseLoggedFt + 200 || need > t.TargetAltitudeFt.Value + 1)
+        {
+            _terrainRaiseLoggedFt = Math.Max(_terrainRaiseLoggedFt, need);
+            Log($"[Pilot] Terrain ahead requires {need:F0} ft — climbing.");
+        }
+        t.TargetAltitudeFt = need;
+    }
+
+    /// <summary>
+    /// True when the aircraft should hold a racetrack instead of descending:
+    /// (a) departure — terrain ahead on the departure track needs more altitude
+    /// than the climb can reach by arrival time (valley departure); or
+    /// (b) arrival — inside 25 NM of the destination and terrain still demands
+    /// more than the approach floor (mountain arrival).
+    /// </summary>
+    private bool ShouldEnterRacetrack(AircraftState s)
+    {
+        var p = _terrainProfile;
+        if (p is null) return false;
+        var phase = Status.Phase;
+
+        // Departure case: early climb phases, still near the departure field.
+        if (phase is FlightPhase.InitialClimb or FlightPhase.Climb &&
+            _departureAirport is not null &&
+            GeoMath.DistanceNm(s.Latitude, s.Longitude,
+                _departureAirport.ReferenceLatitude, _departureAirport.ReferenceLongitude) < 60)
+        {
+            var req = p.RequiredAheadFt(s.Latitude, s.Longitude, 15);
+            if (req > 0)
+            {
+                var climbFpm = _performance.ClimbRateFpm > 0 ? _performance.ClimbRateFpm : 1200;
+                var gs = Math.Max(s.GroundSpeed, cruiseSpeedKt());
+                var etaMin = 15.0 / gs * 60.0;
+                var reachable = s.Altitude + climbFpm * etaMin;
+                if (req > reachable - 200) return EnterRacetrack(s, req, DepartureTrackHeading(s));
+            }
+        }
+
+        // Arrival case: descent near the destination, terrain above approach floor.
+        if (phase == FlightPhase.Descent &&
+            _destinationAirport is not null &&
+            GeoMath.DistanceNm(s.Latitude, s.Longitude,
+                _destinationAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude) < 25)
+        {
+            var floor = _route?.FinalApproachFix?.Altitude
+                        ?? (_destinationAirport.ReferenceAltitudeMeters * GeoMath.FeetPerMeter) + 300;
+            var req = p.RequiredAheadFt(s.Latitude, s.Longitude, 10);
+            if (req > floor + 200) return EnterRacetrack(s, req, ArrivalTrackHeading(s));
+        }
+        return false;
+    }
+
+    private bool EnterRacetrack(AircraftState s, double requiredFt, double headingDeg)
+    {
+        _racetrack.Reset(s.Latitude, s.Longitude);
+        _racetrackActive = true;
+        _racetrackSinceUtc = DateTime.UtcNow;
+        _racetrackHeadingDeg = headingDeg;
+        _racetrackTargetAltFt = Math.Max(requiredFt + 200, s.Altitude + 500);
+        Log($"[Pilot] Racetrack: terrain requires {requiredFt:F0} ft — holding at {_racetrackTargetAltFt:F0} ft.");
+        return true;
+    }
+
+    private double DepartureTrackHeading(AircraftState s)
+    {
+        if (_departureAirport is null) return s.TrueHeading;
+        if (_departureRunwayName is not null)
+        {
+            var h = _departureAirport.FindRunway(_departureRunwayName)?.HeadingDegTrue;
+            if (h is not null) return h.Value;
+        }
+        return _destinationAirport is not null
+            ? GeoMath.BearingDeg(_departureAirport.ReferenceLatitude, _departureAirport.ReferenceLongitude,
+                _destinationAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude)
+            : s.TrueHeading;
+    }
+
+    private double ArrivalTrackHeading(AircraftState s)
+    {
+        if (_destinationAirport is null) return s.TrueHeading;
+        if (_arrivalRunwayName is not null)
+        {
+            var h = _destinationAirport.FindRunway(_arrivalRunwayName)?.HeadingDegTrue;
+            if (h is not null) return h.Value;
+        }
+        return _departureAirport is not null
+            ? GeoMath.BearingDeg(_destinationAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude,
+                _departureAirport.ReferenceLatitude, _destinationAirport.ReferenceLongitude)
+            : s.TrueHeading;
+    }
+
+    /// <summary>Flies the racetrack until terrain permits descent or the cap hits.</summary>
+    private void ExecuteRacetrack(AircraftState s, ControlTargets t)
+    {
+        var heading = _racetrack.Update(s.Latitude, s.Longitude, _racetrackHeadingDeg) ?? _racetrackHeadingDeg;
+        t.TargetHeadingDeg = heading;
+        t.TargetAltitudeFt = _racetrackTargetAltFt;
+        t.TargetAirspeedKt = cruiseSpeedKt();
+        ApplyTerrainClearance(s, t, aheadNm: 15);
+        t.TargetAltitudeFt = Math.Max(t.TargetAltitudeFt ?? 0, _racetrackTargetAltFt);
+
+        var timedOut = DateTime.UtcNow - _racetrackSinceUtc > TimeSpan.FromMinutes(10);
+        var terrainClear = TerrainPermitsDescent(s);
+        if (timedOut || terrainClear)
+        {
+            _racetrackActive = false;
+            Log(timedOut
+                ? "[Pilot] Racetrack time cap reached — resuming route."
+                : "[Pilot] Terrain cleared — resuming route.");
+        }
+    }
+
+    /// <summary>True when terrain ahead no longer exceeds what we can safely fly.</summary>
+    private bool TerrainPermitsDescent(AircraftState s)
+    {
+        var p = _terrainProfile;
+        if (p is null) return true;
+        var phase = Status.Phase;
+        if (phase is FlightPhase.InitialClimb or FlightPhase.Climb)
+        {
+            var req = p.RequiredAheadFt(s.Latitude, s.Longitude, 15);
+            return req <= s.Altitude + 300;
+        }
+        if (phase == FlightPhase.Descent)
+        {
+            var floor = _route?.FinalApproachFix?.Altitude
+                        ?? (_destinationAirport?.ReferenceAltitudeMeters ?? 0) * GeoMath.FeetPerMeter + 300;
+            var req = p.RequiredAheadFt(s.Latitude, s.Longitude, 10);
+            return req <= floor + 200;
+        }
+        return true;
     }
 
     private double cruiseSpeedKt() =>
@@ -1041,19 +1382,44 @@ public sealed class PilotEngine : IDisposable
 
     private void ExecuteDescent(AircraftState s, ControlTargets t)
     {
+        // Mountain arrival: hold a racetrack until terrain permits descent.
+        if (_aircraftKind != AircraftKind.Rotorcraft && (_racetrackActive || ShouldEnterRacetrack(s)))
+        {
+            ExecuteRacetrack(s, t);
+            return;
+        }
+
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            _ap.SetDirectMode(true);
+            t.TargetAirspeedKt = 60;
+            t.TargetAltitudeFt = _route?.FinalApproachFix?.Altitude
+                                 ?? RotorcraftTransitAltitudeFt(s) - 400;
+            var fafAlt = t.TargetAltitudeFt ?? s.Altitude;
+            t.TargetVsFpm = -Math.Clamp((fafAlt - s.Altitude) * 4, -800, -200);
+            ApplyTerrainClearance(s, t, aheadNm: 8);
+            return;
+        }
+
         _ap.SetDirectMode(false);
         _ap.ApMaster(true);
         t.TargetAirspeedKt = Math.Min(cruiseSpeedKt(), 160);
         var vs = -Math.Min(_performance.DescentRateFpm > 0 ? _performance.DescentRateFpm : 1500, 2000);
         t.TargetVsFpm = vs;
         t.TargetAltitudeFt = _route?.FinalApproachFix?.Altitude ?? _targetCruiseAltitudeFt * 0.3;
-        if (s.GearDown == false && s.AltitudeAGL < 3000) t.GearDown = true;
+        ApplyTerrainClearance(s, t, aheadNm: 10);
+        if (s.GearDown == false && s.AltitudeAGL < 3000 && ArrivalNeedsGear()) t.GearDown = true;
     }
 
     // ----- Approach / final -----
 
     private void ExecuteApproach(AircraftState s, ControlTargets t)
     {
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            ExecuteRotorcraftApproach(s, t);
+            return;
+        }
         _ap.SetDirectMode(false);
         _ap.ApMaster(true);
         t.TrackNav = true;
@@ -1061,12 +1427,64 @@ public sealed class PilotEngine : IDisposable
         var fafAlt = _route?.FinalApproachFix?.Altitude ?? s.Altitude;
         t.TargetAltitudeFt = fafAlt;
         t.TargetVsFpm = -Math.Min(1200, Math.Abs(fafAlt - (_destinationAirport?.ReferenceAltitudeMeters ?? 0) * GeoMath.FeetPerMeter) / 5);
-        if (!s.GearDown) t.GearDown = true;
+        if (!s.GearDown && ArrivalNeedsGear()) t.GearDown = true;
         if (s.FlapsHandleIndex < 1) t.FlapIndex = 1;
+    }
+
+    /// <summary>
+    /// Rotorcraft arrival: ~300 ft over the field, ~30 kt, then a vertical
+    /// set-down onto the airport reference point (aerotto-style hover landing).
+    /// </summary>
+    private void ExecuteRotorcraftApproach(AircraftState s, ControlTargets t)
+    {
+        _ap.SetDirectMode(true);
+        var dstElevFt = (_destinationAirport?.ReferenceAltitudeMeters ?? 0) * GeoMath.FeetPerMeter;
+        var target = _route?.RunwayWaypoint;
+        var distNm = target is { HasPosition: true }
+            ? GeoMath.DistanceNm(s.Latitude, s.Longitude, target.Latitude, target.Longitude)
+            : 0;
+
+        t.GearDown = false;
+        t.FlapIndex = 0;
+        t.TargetAirspeedKt = distNm > 1.0 ? 30 : null;
+        t.ThrottleFraction = 0.55;
+
+        if (distNm > 1.0)
+        {
+            // Still outbound: follow the route, descend to ~300 ft AGL.
+            if (_routeNav is not null)
+            {
+                var (_, heading, _) = _nav.Update(s, _routeNav);
+                t.TargetHeadingDeg = heading;
+                t.TrackNav = true;
+            }
+            else if (target is { HasPosition: true })
+            {
+                t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, target.Latitude, target.Longitude);
+            }
+            t.TargetAltitudeFt = dstElevFt + 300;
+            t.TargetVsFpm = -Math.Clamp((dstElevFt + 300 - s.Altitude) * 4, -600, -150);
+            return;
+        }
+
+        // Overhead: descend vertically onto the pad.
+        t.TargetHeadingDeg = s.TrueHeading;
+        t.TargetAltitudeFt = dstElevFt + 20;
+        if (s.AltitudeAGL > 60) t.TargetVsFpm = -150;
+        else if (s.AltitudeAGL > 15) t.TargetVsFpm = -80;
+        else t.TargetVsFpm = -30; // flare / set down
+        t.ThrottleFraction = s.AltitudeAGL < 30 ? 0.35 : 0.5;
+
+        if (s.OnGround) SetPhase(FlightPhase.Rollout);
     }
 
     private void ExecuteFinalApproach(AircraftState s, ControlTargets t, TurbulenceLevel turbulence)
     {
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            ExecuteRotorcraftApproach(s, t);
+            return;
+        }
         _ap.SetDirectMode(true); // precision: direct control on short final
         var rw = _arrivalRunwayName is not null && _destinationAirport is not null
             ? _destinationAirport.FindRunway(_arrivalRunwayName) : null;
@@ -1111,7 +1529,9 @@ public sealed class PilotEngine : IDisposable
         }
 
         if (s.FlapsHandleIndex < 2) t.FlapIndex = 2;
-        if (!s.GearDown) t.GearDown = true;
+        // Water arrival: wheels up (amphibians), floatplanes have no gear.
+        if (!ArrivalNeedsGear()) t.GearDown = false;
+        else if (!s.GearDown) t.GearDown = true;
 
         // Flare and rollout handled by touchdown detection in AdvancePhase.
         if (s.OnGround) SetPhase(FlightPhase.Rollout);
@@ -1119,6 +1539,21 @@ public sealed class PilotEngine : IDisposable
 
     private void ExecuteGoAround(AircraftState s, ControlTargets t)
     {
+        if (_aircraftKind == AircraftKind.Rotorcraft)
+        {
+            // Climb back to transit altitude, then re-approach.
+            _ap.SetDirectMode(true);
+            t.TargetAltitudeFt = RotorcraftTransitAltitudeFt(s);
+            t.TargetVsFpm = 800;
+            t.TargetAirspeedKt = 60;
+            var next = _routeNav?.Waypoints
+                .Skip(_routeNav.CurrentWaypointIndex)
+                .FirstOrDefault(w => w.HasPosition && w.Type != WaypointType.MissedApproach);
+            if (next is not null)
+                t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, next.Latitude, next.Longitude);
+            t.GearDown = false;
+            return;
+        }
         _ap.SetDirectMode(false);
         _ap.ApMaster(true);
         // Fly the published missed approach first when the route carries one.
@@ -1131,7 +1566,7 @@ public sealed class PilotEngine : IDisposable
         }
         t.TargetAltitudeFt = _targetCruiseAltitudeFt;
         t.TargetAirspeedKt = _performance.ClimbSpeed > 0 ? _performance.ClimbSpeed : 90;
-        if (!s.GearDown) t.GearDown = true;
+        if (ArrivalNeedsGear() && !s.GearDown) t.GearDown = true;
         if (s.FlapsHandleIndex > 0) t.FlapIndex = 0;
     }
 
@@ -1211,17 +1646,31 @@ public sealed class PilotEngine : IDisposable
         _departureAirport ??= await FindNearestAirportAsync(s, ct);
         if (_departureAirport is null) { Log("[Pilot] Cannot determine departure airport."); return false; }
         _destinationAirport = destination;
-        return BuildAndLoadRouteAsync(s);
+        return await BuildAndLoadRouteAsync(s, ct);
     }
 
-    private bool BuildAndLoadRouteAsync(AircraftState s)
+    private async Task<bool> BuildAndLoadRouteAsync(AircraftState s, CancellationToken ct = default)
     {
         if (_departureAirport is null || _destinationAirport is null) return false;
 
-        // Pick runways into the wind.
-        _departureRunwayName ??= ContinuousFlightPlanner.PickRunway(_departureAirport, s.WindDirection, _takeoffRunMeters(s))?.name;
-        _arrivalRunwayName ??= ContinuousFlightPlanner.PickRunway(_destinationAirport, s.WindDirection,
-            _landingRunMeters(s))?.name;
+        var rotorcraft = _aircraftKind == AircraftKind.Rotorcraft;
+        // Pick runways into the wind; rotorcraft don't use runways at all.
+        if (!rotorcraft)
+        {
+            _departureRunwayName ??= ContinuousFlightPlanner.PickRunway(_departureAirport, s.WindDirection,
+                _takeoffRunMeters(s),
+                waterOnly: _aircraftKind == AircraftKind.Seaplane,
+                preferWater: _aircraftKind == AircraftKind.Amphibian)?.name;
+            _arrivalRunwayName ??= ContinuousFlightPlanner.PickRunway(_destinationAirport, s.WindDirection,
+                _landingRunMeters(s),
+                waterOnly: _aircraftKind == AircraftKind.Seaplane,
+                preferWater: _aircraftKind == AircraftKind.Amphibian)?.name;
+        }
+        else
+        {
+            _departureRunwayName = null;
+            _arrivalRunwayName = null;
+        }
 
         var req = new RouteRequest
         {
@@ -1229,16 +1678,24 @@ public sealed class PilotEngine : IDisposable
             Destination = _destinationAirport,
             DepartureRunway = _departureRunwayName,
             DestinationRunway = _arrivalRunwayName,
-            CruiseAltitudeFt = ChooseCruiseAltitude(s),
+            CruiseAltitudeFt = rotorcraft ? 0 : ChooseCruiseAltitude(s),
             ClimbRateFpm = _performance.ClimbRateFpm > 0 ? _performance.ClimbRateFpm : 1500,
             DescentRateFpm = _performance.DescentRateFpm > 0 ? _performance.DescentRateFpm : 1500,
-            ApproachSpeedKt = _performance.ApproachSpeed > 0 ? _performance.ApproachSpeed : 90,
-            CruiseSpeedKt = cruiseSpeedKt(),
+            ApproachSpeedKt = rotorcraft ? 30 : (_performance.ApproachSpeed > 0 ? _performance.ApproachSpeed : 90),
+            CruiseSpeedKt = rotorcraft ? Math.Min(cruiseSpeedKt(), 90) : cruiseSpeedKt(),
+            AircraftKind = _aircraftKind,
         };
         _route = RouteBuilder.Build(req);
-        _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
         _goAroundForTraffic = false;
+        _racetrackActive = false;
+        _terrainRaiseLoggedFt = 0;
         _nav.Reset();
+
+        // Terrain analysis: sample elevations along the route, raise cruise and
+        // enroute waypoint altitudes to the required floor. Falls back to
+        // airport+3000 ft when elevation data is unavailable.
+        await AnalyzeTerrainAsync(s, ct);
+        _targetCruiseAltitudeFt = _route.CruiseAltitudeFt;
 
         // Load the route into the sim's own flight plan so the GPS follows it.
         try
@@ -1281,6 +1738,72 @@ public sealed class PilotEngine : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Samples terrain along the route and raises cruise/enroute altitudes to
+    /// the required clearance floor. Falls back to airport+3000 ft when the
+    /// elevation service is unavailable — never silently assumes flat terrain.
+    /// </summary>
+    private async Task AnalyzeTerrainAsync(AircraftState s, CancellationToken ct)
+    {
+        _terrainProfile = null;
+        if (_route is null) return;
+
+        var routePts = _route.Waypoints
+            .Where(w => w.HasPosition)
+            .Select(w => (w.Latitude, w.Longitude))
+            .ToList();
+        if (routePts.Count < 2) return;
+
+        var samplePts = TerrainProfile.SampleRoutePoints(routePts);
+        IReadOnlyList<double>? elevations = null;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            elevations = await _terrainElevations.GetElevationsAsync(samplePts, timeout.Token);
+        }
+        catch { /* network/parse failure → fallback below */ }
+
+        if (elevations is not null && elevations.Count == samplePts.Count)
+        {
+            var samples = samplePts
+                .Select((p, i) => new TerrainSample(p.lat, p.lon, elevations[i]))
+                .ToList();
+            _terrainProfile = TerrainProfile.Build(samples);
+        }
+        else
+        {
+            var maxAirportElevM = Math.Max(
+                _departureAirport?.ReferenceAltitudeMeters ?? 0,
+                _destinationAirport?.ReferenceAltitudeMeters ?? 0);
+            _terrainProfile = TerrainProfile.Fallback(maxAirportElevM, routePts);
+            Log("[Pilot] Terrain elevation data unavailable — using airport+3000 ft clearance fallback.");
+        }
+        if (_terrainProfile is null) return;
+
+        var floor = _terrainProfile.MaxRequiredAltitudeFt;
+        if (_terrainProfile.Mountainous)
+            Log("[Pilot] Mountainous terrain on route — 2000 ft margin applied over high ground.");
+        if (_terrainProfile.IsFallback)
+            Log($"[Pilot] Terrain fallback floor: {floor:F0} ft MSL.");
+
+        // Rotorcraft fly low by design; their in-flight check handles terrain.
+        if (_aircraftKind == AircraftKind.Rotorcraft) return;
+
+        if (floor > _route.CruiseAltitudeFt)
+        {
+            Log($"[Pilot] Terrain requires {floor:F0} ft — raising cruise from {_route.CruiseAltitudeFt:F0} ft.");
+            _route.CruiseAltitudeFt = floor;
+            foreach (var w in _route.Waypoints.Where(w =>
+                         w.Type is WaypointType.Intersection or WaypointType.User))
+            {
+                if (w.Altitude < floor) w.Altitude = floor;
+            }
+        }
+        if (floor > 20000)
+            Log($"[Pilot] Warning: terrain requires {floor:F0} ft — may exceed this aircraft's ceiling.");
+    }
+
     private double _landingRunMeters(AircraftState s)
     {
         var weight = s.GrossWeight > 0 ? s.GrossWeight : _performance.MaxLandingWeight;
@@ -1314,14 +1837,14 @@ public sealed class PilotEngine : IDisposable
         if (dep is null) { Log("[Pilot] No departure airport for next leg."); return false; }
 
         var dest = await _planner.PickDestinationAsync(dep.ReferenceLatitude, dep.ReferenceLongitude, rangeNm,
-            TimeSpan.FromSeconds(60), ct);
+            TimeSpan.FromSeconds(60), ct, _aircraftKind);
         if (dest is null) { Log("[Pilot] No suitable destination found in range."); return false; }
 
         _departureAirport = dep;
         _destinationAirport = dest;
         _departureRunwayName = null;
         _arrivalRunwayName = null;
-        var ok = BuildAndLoadRouteAsync(s);
+        var ok = await BuildAndLoadRouteAsync(s, ct);
         if (ok) _legsFlown++;
         return ok;
     }
@@ -1386,14 +1909,19 @@ public sealed class PilotEngine : IDisposable
         {
             _performance = AircraftConfigParser.ParseAircraftConfig(dir);
             _checklists.Reload(dir);
-            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType})");
-            // Rotorcraft: restrict continuous mode suitability.
-            var isRotor = _performance.EngineType.Contains("ROTOR", StringComparison.OrdinalIgnoreCase)
-                       || dir.Contains("rotor", StringComparison.OrdinalIgnoreCase);
-            if (isRotor)
+            _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
+            _planner.Kind = _aircraftKind;
+            lock (_lock) _status.AircraftKind = _aircraftKind;
+            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind}");
+
+            if (_aircraftKind == AircraftKind.Rotorcraft)
             {
-                _planner.RequiredRunwayMeters = Math.Min(_planner.RequiredRunwayMeters, 200);
+                _planner.RequiredRunwayMeters = 0;
                 _planner.MinRangeNm = 10;
+            }
+            else if (AircraftKindDetector.IsWaterKind(_aircraftKind))
+            {
+                Log($"[Pilot] {_aircraftKind}: water runways preferred for all legs.");
             }
         }
         catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
@@ -1425,6 +1953,7 @@ public sealed class PilotEngine : IDisposable
                 Phase = _status.Phase,
                 StatusText = _status.StatusText,
                 AircraftTitle = _status.AircraftTitle,
+                AircraftKind = _status.AircraftKind,
                 DepartureIcao = _status.DepartureIcao,
                 DestinationIcao = _status.DestinationIcao,
                 DepartureRunway = _status.DepartureRunway,

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.Airports;
 using MSFS2024AIPilot.Core.Geo;
 using MSFS2024AIPilot.Core.State;
@@ -23,6 +24,8 @@ public sealed class RouteRequest
     public bool PreferIls { get; set; } = true;
     /// <summary>ILS frequency in MHz for the destination runway, when known.</summary>
     public double? IlsFrequencyMhz { get; set; }
+    /// <summary>Operational class — rotorcraft get a direct point-to-point route.</summary>
+    public AircraftKind AircraftKind { get; set; } = AircraftKind.Airplane;
 }
 
 /// <summary>The generated flight plan plus the waypoints that carry approach guidance.</summary>
@@ -69,6 +72,9 @@ public static class RouteBuilder
             DestinationRunway = req.DestinationRunway,
             CruiseAltitudeFt = req.CruiseAltitudeFt,
         };
+
+        if (req.AircraftKind == AircraftKind.Rotorcraft)
+            return BuildRotorcraftRoute(req, route);
 
         // --- Departure end ---
         var depThreshold = DepartureThreshold(req.Departure, req.DepartureRunway);
@@ -176,6 +182,89 @@ public static class RouteBuilder
             });
         }
 
+        return route;
+    }
+
+    /// <summary>
+    /// Rotorcraft route: airport reference to airport reference, no runway
+    /// geometry. Transit altitude is 500 ft AGL for short legs, 1,000 ft for
+    /// longer ones (aerotto-style); the final fix sits ~3 NM out at ~300 ft.
+    /// </summary>
+    private static BuiltRoute BuildRotorcraftRoute(RouteRequest req, BuiltRoute route)
+    {
+        var depElevFt = req.Departure.ReferenceAltitudeMeters * GeoMath.FeetPerMeter;
+        var dstElevFt = req.Destination.ReferenceAltitudeMeters * GeoMath.FeetPerMeter;
+        var fieldFloorFt = Math.Max(depElevFt, dstElevFt);
+
+        var startLat = req.Departure.ReferenceLatitude;
+        var startLon = req.Departure.ReferenceLongitude;
+        var endLat = req.Destination.ReferenceLatitude;
+        var endLon = req.Destination.ReferenceLongitude;
+
+        var totalNm = GeoMath.DistanceNm(startLat, startLon, endLat, endLon);
+        route.TotalDistanceNm = totalNm;
+        var transitFt = fieldFloorFt + (totalNm < 15 ? 500 : 1000);
+        route.CruiseAltitudeFt = transitFt;
+
+        route.Waypoints.Add(new FlightPlanWaypoint
+        {
+            Ident = req.Departure.Icao,
+            Type = WaypointType.Airport,
+            Latitude = startLat,
+            Longitude = startLon,
+            Altitude = depElevFt,
+        });
+
+        var count = Math.Clamp((int)Math.Ceiling(totalNm / 30), 1, 10);
+        for (var i = 1; i <= count; i++)
+        {
+            var frac = (double)i / (count + 1);
+            var (lat, lon) = GreatCirclePoint(startLat, startLon, endLat, endLon, frac);
+            route.Waypoints.Add(new FlightPlanWaypoint
+            {
+                Ident = $"RT{i}",
+                Type = WaypointType.Intersection,
+                Latitude = lat,
+                Longitude = lon,
+                Altitude = transitFt,
+            });
+        }
+
+        // Final fix ~3 NM short of the destination at ~300 ft AGL.
+        var inBearing = GeoMath.BearingDeg(endLat, endLon, startLat, startLon);
+        var (fafLat, fafLon) = GeoMath.DestinationNm(endLat, endLon, inBearing, 3);
+        var faf = new FlightPlanWaypoint
+        {
+            Ident = "FAF",
+            Type = WaypointType.Intersection,
+            Latitude = fafLat,
+            Longitude = fafLon,
+            Altitude = dstElevFt + 300,
+        };
+        route.Waypoints.Add(faf);
+        route.FinalApproachFix = faf;
+
+        var dst = new FlightPlanWaypoint
+        {
+            Ident = req.Destination.Icao,
+            Type = WaypointType.Airport,
+            Latitude = endLat,
+            Longitude = endLon,
+            Altitude = dstElevFt,
+        };
+        route.Waypoints.Add(dst);
+        route.RunwayWaypoint = dst;
+
+        var (mapLat, mapLon) = GeoMath.DestinationNm(endLat, endLon, inBearing + 180, 3);
+        var map = new FlightPlanWaypoint
+        {
+            Ident = "MAP",
+            Type = WaypointType.MissedApproach,
+            Latitude = mapLat,
+            Longitude = mapLon,
+            Altitude = transitFt,
+        };
+        route.MissedApproachFix = map;
         return route;
     }
 

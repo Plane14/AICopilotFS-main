@@ -167,6 +167,30 @@ public sealed class RunwayInfo
         return PrimaryName.Equals(n, StringComparison.OrdinalIgnoreCase) ||
                SecondaryName.Equals(n, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Official facility SURFACE enum water values (FSX water = 2; MSFS adds
+    /// ocean/water/pond/lake/river/waste-water = 26–31). The WATER runway
+    /// designator (4) is accepted as a secondary signal.
+    /// </summary>
+    public bool IsWater =>
+        Surface is 2 or >= 26 and <= 31 ||
+        PrimaryDesignator == 4 || SecondaryDesignator == 4;
+}
+
+public static class RunwaySurface
+{
+    public const int Concrete = 0;
+    public const int Grass = 1;
+    public const int Water = 2;
+    public const int GrassBumpy = 3;
+    public const int Asphalt = 4;
+    public const int Ocean = 26;
+    public const int Pond = 28;
+    public const int Lake = 29;
+    public const int River = 30;
+    public const int Unknown = 254;
+    public const int Undefined = 255;
 }
 
 public sealed class AirportData
@@ -210,6 +234,13 @@ public sealed class AirportData
 
     public IEnumerable<GroundNode> HoldShortNodes =>
         Nodes.Values.Where(n => n.Type is GroundNodeType.HoldShort or GroundNodeType.IlsHoldShort);
+
+    /// <summary>Runways whose declared surface is water (seaplane lanes).</summary>
+    public IEnumerable<RunwayInfo> WaterRunways => Runways.Where(r => r.IsWater);
+
+    public bool HasWaterRunway => Runways.Any(r => r.IsWater);
+
+    public bool HasRunways => Runways.Count > 0;
 }
 
 /// <summary>

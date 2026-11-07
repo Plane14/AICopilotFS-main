@@ -1,6 +1,7 @@
 using System;
 using System.Windows;
 using System.Windows.Threading;
+using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.Pilot;
 using MSFS2024AIPilot.Core.State;
 
@@ -104,7 +105,8 @@ public partial class MainWindow : Window
         TxtEta.Text = $"{s.EtaMinutes:F0} min";
         TxtDep.Text = string.IsNullOrEmpty(s.DepartureIcao) ? "—" : $"{s.DepartureIcao} {s.DepartureRunway}";
         TxtDest.Text = string.IsNullOrEmpty(s.DestinationIcao) ? "—" : $"{s.DestinationIcao} {s.DestinationRunway}";
-        TxtAircraft.Text = string.IsNullOrEmpty(s.AircraftTitle) ? "" : $"✈ {s.AircraftTitle}";
+        var kindSuffix = s.AircraftKind == AircraftKind.Airplane ? "" : $" · {s.AircraftKind}";
+        TxtAircraft.Text = string.IsNullOrEmpty(s.AircraftTitle) ? "" : $"✈ {s.AircraftTitle}{kindSuffix}";
         TxtChecklistPhase.Text = s.ChecklistPhaseName;
         TxtChecklistItem.Text = s.CurrentChecklistItem;
         BarChecklist.Value = s.ChecklistProgress;

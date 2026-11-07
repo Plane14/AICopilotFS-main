@@ -196,6 +196,7 @@ public sealed class SimAircraft : IDisposable
             ("SYSTEMS", "SIM ON GROUND", "bool"),
             ("SYSTEMS", "GEAR HANDLE POSITION", "bool"),
             ("SYSTEMS", "GEAR TOTAL PCT EXTENDED", "percent"),
+            ("SYSTEMS", "IS GEAR FLOATS", "bool"),
             ("SYSTEMS", "BRAKE PARKING POSITION", "bool"),
             ("SYSTEMS", "FLAPS HANDLE INDEX", "number"),
             ("SYSTEMS", "FLAPS NUM HANDLE POSITIONS", "number"),
@@ -520,12 +521,13 @@ public sealed class SimAircraft : IDisposable
                 case "SYSTEMS":
                     _state.OnGround = D(0) > 0.5;
                     _state.GearDown = D(1) > 0.5;
-                    _state.ParkingBrakeSet = D(3) > 0.5;
-                    _state.FlapsHandleIndex = D(4);
-                    _state.FlapsPosition = D(6);
-                    _state.StallWarning = D(7) > 0.5;
-                    _state.OverspeedWarning = D(8) > 0.5;
-                    _state.BarberPoleKt = D(9);
+                    _state.GearIsFloats = D(3) > 0.5;
+                    _state.ParkingBrakeSet = D(4) > 0.5;
+                    _state.FlapsHandleIndex = D(5);
+                    _state.FlapsPosition = D(7);
+                    _state.StallWarning = D(8) > 0.5;
+                    _state.OverspeedWarning = D(9) > 0.5;
+                    _state.BarberPoleKt = D(10);
                     break;
                 case "APMODES":
                     _state.Autopilot.FlightDirector = D(0) > 0.5;
