@@ -316,10 +316,20 @@ public sealed class ChecklistExecutor
             if (action.Special != SpecialActionType.None || action.EventId == null) continue;
             if (action.Condition is ActionCondition.TestValueTrue or ActionCondition.End) continue;
             if (action.Once && _firedOnce) continue;
-            if (!_firedEvents.Contains(action.EventId)) return true;
+            if (!_firedEvents.Contains(FireKey(action))) return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// Dedup key for a fired action. The parameter is part of the key: the same
+    /// event with different payloads is a different command — e.g. the turbine
+    /// starter needs SET_STARTERn_HELD 1 to engage and SET_STARTERn_HELD 0 to
+    /// release, and keying on the event name alone would make the release
+    /// unreachable after the engage fired.
+    /// </summary>
+    private static string FireKey(ChecklistAction action)
+        => $"{action.EventId}|{action.EventParam ?? 1}";
 
     /// <summary>
     /// Commands an item that has actions but nothing to verify, and completes it after its
@@ -370,7 +380,7 @@ public sealed class ChecklistExecutor
             if (action.Condition == ActionCondition.TestValueTrue) continue;
             if (action.Condition == ActionCondition.End) continue;
             if (action.Once && _firedOnce) continue;
-            if (!_firedEvents.Add(action.EventId)) continue;
+            if (!_firedEvents.Add(FireKey(action))) continue;
             _host.FireEvent(action.EventId, action.EventParam ?? 1);
             _fires++;
             fired = true;
@@ -398,7 +408,7 @@ public sealed class ChecklistExecutor
         {
             if (action.Special != SpecialActionType.None || action.EventId == null) continue;
             if (action.Condition != ActionCondition.TestValueTrue) continue;
-            if (!_firedEvents.Add(action.EventId)) continue;
+            if (!_firedEvents.Add(FireKey(action))) continue;
             _host.FireEvent(action.EventId, action.EventParam ?? 1);
         }
 

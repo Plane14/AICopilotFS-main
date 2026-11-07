@@ -501,6 +501,17 @@ public sealed class SimConnectClient : IDisposable
         return results;
     }
 
+    /// <summary>
+    /// Removes a data definition and stops every request still feeding from it.
+    /// SimConnect caps the number of live requests per client, so long sessions
+    /// must release definitions they no longer need.
+    /// </summary>
+    public void ClearDataDefinition(uint defineId)
+    {
+        if (defineId == 0 || _handle == IntPtr.Zero) return;
+        SendNamed($"clear data definition {defineId}", () => SimConnect_ClearDataDefinition(_handle, defineId));
+    }
+
     public uint RequestData(uint defineId, uint objectId = 0, Period period = Period.Second, uint interval = 0, uint limit = 0)
     {
         string names;
@@ -691,6 +702,9 @@ public sealed class SimConnectClient : IDisposable
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
     private static extern int SimConnect_RequestDataOnSimObjectType(IntPtr hSimConnect, uint RequestID, uint DefineID, uint dwRadiusMeters, uint ObjectType);
+
+    [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
+    private static extern int SimConnect_ClearDataDefinition(IntPtr hSimConnect, uint DefineID);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, CharSet = CharSet.Ansi, SetLastError = true)]
     private static extern int SimConnect_MapClientEventToSimEvent(IntPtr hSimConnect, uint EventID, [MarshalAs(UnmanagedType.LPStr)] string EventName);

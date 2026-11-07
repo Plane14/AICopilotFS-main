@@ -25,6 +25,7 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
     {
         public string Name = "";
         public string Units = "number";
+        public uint DefineId;
         public uint RequestId;
         public Subscription? Owner;
         public double Value;
@@ -47,7 +48,15 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
         if (_sc.IsConnected) Attach();
     }
 
-    private void OnSimConnected() => Attach();
+    private void OnSimConnected()
+    {
+        // A new connection invalidates every definition and request created on
+        // the old one; without this the feeds kept stale request IDs and every
+        // checklist simvar read "waiting for data" until it timed out.
+        _byRequest.Clear();
+        foreach (var feed in _feeds.Values) feed.RequestId = 0;
+        Attach();
+    }
 
     private void Attach()
     {
@@ -68,9 +77,9 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
     /// </summary>
     private void StartFeed(SimVarFeed feed)
     {
-        var defineId = _sc.CreateDataDefinition();
-        _sc.AddToDataDefinition(defineId, feed.Name, feed.Units);
-        feed.RequestId = _sc.RequestData(defineId, period: Period.Second);
+        feed.DefineId = _sc.CreateDataDefinition();
+        _sc.AddToDataDefinition(feed.DefineId, feed.Name, feed.Units);
+        feed.RequestId = _sc.RequestData(feed.DefineId, period: Period.Second);
         _byRequest[feed.RequestId] = feed;
     }
 
@@ -124,7 +133,20 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
         {
             if (!ReferenceEquals(feed.Owner, sub)) continue;
             feed.Owner = null;
-            if (!_subscriptions.Values.Any(s => s.Feeds.Contains(feed))) _feeds.Remove(feed.Name);
+            if (!_subscriptions.Values.Any(s => s.Feeds.Contains(feed)))
+            {
+                _feeds.Remove(feed.Name);
+                // ClearDataDefinition stops the request too: dropping only the
+                // dictionary entries left the sim streaming the simvar forever,
+                // and SimConnect caps the number of live requests per client.
+                if (feed.RequestId != 0) _byRequest.Remove(feed.RequestId);
+                if (feed.DefineId != 0)
+                {
+                    _sc.ClearDataDefinition(feed.DefineId);
+                    feed.DefineId = 0;
+                }
+                feed.RequestId = 0;
+            }
         }
         sub.Feeds.Clear();
     }

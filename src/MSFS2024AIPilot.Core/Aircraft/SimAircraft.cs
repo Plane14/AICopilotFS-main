@@ -400,18 +400,32 @@ public sealed class SimAircraft : IDisposable
             var title = OrNull(0);
             title = AircraftPackageLocator.CleanTitle(title);
             if (string.IsNullOrWhiteSpace(title)) return;
+            var titleChanged = false;
             var needsDir = false;
             lock (_stateLock)
             {
                 if (!string.Equals(title, _aircraftTitle, StringComparison.OrdinalIgnoreCase))
                 {
                     _aircraftTitle = title;
+                    titleChanged = true;
                     OnAircraftTitleChanged?.Invoke(_aircraftTitle);
                 }
                 needsDir = string.IsNullOrWhiteSpace(_aircraftDirectory);
             }
-            if (needsDir)
+            // Re-resolve on ANY title change, not just the first: swapping the
+            // aircraft in-sim updates TITLE but leaves _aircraftDirectory
+            // pointing at the previous package, which would keep stale
+            // performance/checklist data forever. UpdateAircraftIdentity only
+            // publishes when the resolved directory actually differs.
+            if (needsDir || titleChanged)
+            {
                 QueueIdentityWork(() => UpdateAircraftIdentity(null, _aircraftTitle));
+                // The AircraftLoaded system state carries the exact package
+                // path — far more reliable than a title scan for encrypted
+                // simobjects whose aircraft.cfg cannot be read for matching.
+                if (titleChanged)
+                    _sc.RequestUserAircraftTitle(RequestAircraftTitle);
+            }
         }
         else if (data.DefineId == _atcTextDefineId)
         {

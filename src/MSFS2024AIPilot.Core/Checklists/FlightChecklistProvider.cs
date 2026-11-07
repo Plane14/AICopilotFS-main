@@ -234,7 +234,10 @@ public static class FlightChecklistProvider
         var set = new AircraftChecklistSet { AircraftTitle = slug, Format = ChecklistSetFormat.WebJson };
         foreach (var phase in doc.RootElement.EnumerateArray())
         {
-            var phaseName = phase.GetProperty("name").GetString() ?? "";
+            if (phase.ValueKind != JsonValueKind.Object ||
+                !phase.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String)
+                continue;
+            var phaseName = nameEl.GetString() ?? "";
             if (!phase.TryGetProperty("steps", out var steps) || steps.ValueKind != JsonValueKind.Array)
                 continue;
 
@@ -361,6 +364,7 @@ public static class FlightChecklistProvider
             {
                 perf.Vno = kts;                       // level max speed ≈ never-exceed-ish
                 perf.CruisePerf.DefaultCruiseSpeed = kts * 0.85;
+                perf.CruiseSpeedKt = kts * 0.85;      // the value CruiseSpeed actually reads
                 found = true;
             }
         }

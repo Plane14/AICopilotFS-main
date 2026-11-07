@@ -758,6 +758,18 @@ public sealed class PilotEngine : IDisposable
 
     private DateTime _starterAttemptUtc = DateTime.MinValue;
     private int _starterAttempts;
+    private bool _turbineStartersHeld;
+
+    /// <summary>Releases SET_STARTERn_HELD once, after light-off or when giving up.</summary>
+    private void ReleaseHeldStarters(AircraftState s)
+    {
+        if (!_turbineStartersHeld) return;
+        var engines = Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4);
+        for (int e = 1; e <= engines; e++)
+            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 0);
+        _turbineStartersHeld = false;
+        Log("[Pilot] Held starter(s) released.");
+    }
 
     private void ExecuteStartup(AircraftState s, ControlTargets t, DateTime now)
     {
@@ -788,31 +800,28 @@ public sealed class PilotEngine : IDisposable
                     for (int e = 1; e <= engines; e++)
                     {
                         _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
-                        if (turbine) _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 1);
+                        if (turbine)
+                        {
+                            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 1);
+                            _turbineStartersHeld = true;
+                        }
                     }
                     _starterAttemptUtc = now;
                     _starterAttempts++;
                     Log($"[Pilot] Attempting engine start ({engines} engine(s)).");
                 }
-                // Release held starters once the engines are running so they
-                // cannot wind up against a lighted engine.
-                if (s.EnginesRunning && _starterAttempts > 0)
-                {
-                    var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
-                                  _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase);
-                    if (turbine)
-                        for (int e = 1; e <= Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4); e++)
-                            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 0);
-                    _starterAttempts = 0;
-                }
                 if (_starterAttempts >= 8)
                 {
+                    ReleaseHeldStarters(s);
                     Log("[Pilot] WARNING: engines did not start after repeated attempts; continuing anyway.");
                     SetPhase(FlightPhase.TaxiOut);
                     BeginTaxiOut(s);
                 }
                 return;
             }
+            // Engines are running: release held turbine starters once so they
+            // cannot wind up against a lighted engine.
+            ReleaseHeldStarters(s);
             // Request IFR clearance / flight following before departure.
             _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight", MenuLinesFor(AtcRequestKind.IfreClearance));
             if (_aircraftKind == AircraftKind.Rotorcraft)
@@ -2352,6 +2361,7 @@ public sealed class PilotEngine : IDisposable
         if (web.MaxTakeoffWeight > 0) p.MaxTakeoffWeight = web.MaxTakeoffWeight;
         if (web.MaxLandingWeight > 0) p.MaxLandingWeight = web.MaxLandingWeight;
         if (web.CruisePerf.DefaultCruiseSpeed > 0) p.CruisePerf.DefaultCruiseSpeed = web.CruisePerf.DefaultCruiseSpeed;
+        if (web.CruiseSpeedKt > 0) p.CruiseSpeedKt = web.CruiseSpeedKt;
         if (web.CruisePerf.MaxCruiseAltitude > 0) p.CruisePerf.MaxCruiseAltitude = web.CruisePerf.MaxCruiseAltitude;
     }
 
