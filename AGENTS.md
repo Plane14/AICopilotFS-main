@@ -25,7 +25,7 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | Component | File | Purpose |
 |---|---|---|
 | SimConnect client | `Core/SimConnect/SimConnect.cs` | Native P/Invoke wrapper over `SimConnect.dll`: data definitions, events, SimObject/string/facility data, airport lists, flight-plan load |
-| Aircraft link | `Core/Aircraft/SimAircraft.cs` | Owns the connection; registers one data definition per block (POSITION, ATTITUDE, SPEEDS, ENGINES, ENGINE_LIMITS, FUEL, AUTOPILOT, ENVIRONMENT, NAVIGATION, NAVRADIO, SYSTEMS, APMODES, COM, ATC, WEATHER, PUSHBACK, ATC text, aircraft title) and decodes them into `AircraftState` |
+| Aircraft link | `Core/Aircraft/SimAircraft.cs` | Owns the connection; registers one data definition per block (POSITION, ATTITUDE, SPEEDS, ENGINES, ENGINE_LIMITS, FUEL, AUTOPILOT, ENVIRONMENT, NAVIGATION, NAVRADIO, SYSTEMS, APMODES, COM, ATC, WEATHER, PUSHBACK, ATC text, aircraft title) and decodes them into `AircraftState`. Runs a dedicated pump thread that blocks on the SimConnect message event (`hEventHandle` passed to `SimConnect_Open`) and drains `SimConnect_CallDispatch` — `CallDispatch` blocks when the sim has no messages, so it is only ever called while the event is signaled |
 | MSFS paths | `Core/Paths/SimPaths.cs` | `UserCfg.opt` parsing, Store package roots, community/official package folders, VFS projection |
 | Aircraft package | `Core/Aircraft/AircraftPackageLocator.cs` | Locates the loaded aircraft's package directory from its title |
 | Performance | `Core/Aircraft/Performance.cs` | `AircraftPerformance` + `AircraftConfigParser` for `aircraft.cfg` / `flight_model.cfg` / `engines.cfg` / `flight_performance.cfg` |

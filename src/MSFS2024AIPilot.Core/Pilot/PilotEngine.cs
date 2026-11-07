@@ -352,8 +352,8 @@ public sealed class PilotEngine : IDisposable
         {
             try
             {
-                _tickStage = "dispatch";
-                _aircraft.Dispatch();
+                // SimConnect messages are pumped on SimAircraft's dedicated
+                // thread — this loop only reads the latest snapshot.
                 var now = DateTime.UtcNow;
                 _lastLoopHeartbeatUtc = now;
                 _tickStage = "tick";

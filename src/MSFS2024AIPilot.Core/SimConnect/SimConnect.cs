@@ -144,7 +144,12 @@ public sealed class SimConnectClient : IDisposable
     }
 
     /// <summary>Pumps the SimConnect message queue. Call periodically from the host loop.</summary>
-    public void Dispatch()
+    /// <summary>
+    /// Pumps pending SimConnect messages. With <paramref name="idleWaitMs"/> &gt; 0
+    /// the call sleeps on the message event first — the intended use is a
+    /// dedicated pump thread that blocks until the sim has something to send.
+    /// </summary>
+    public void Dispatch(int idleWaitMs = 0)
     {
         IntPtr handle;
         IntPtr context;
@@ -165,9 +170,13 @@ public sealed class SimConnectClient : IDisposable
             }
             // CallDispatch blocks until a message arrives on MSFS — only call
             // it while the sim says messages are pending, otherwise an idle
-            // sim (loading, paused, menu) freezes the control loop indefinitely.
+            // sim (loading, paused, menu) freezes the caller indefinitely.
+            // WaitOne already consumed one signal when idleWaitMs > 0; with
+            // idleWaitMs == 0 we still need a pending-message check first or
+            // CallDispatch would block on an empty queue.
+            if (idleWaitMs > 0 ? !_msgEvent.WaitOne(idleWaitMs) : !_msgEvent.WaitOne(0)) return;
             var pumps = 0;
-            while (_msgEvent.WaitOne(0) && pumps++ < 500)
+            do
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 long cbBefore = Interlocked.Read(ref _callbackTicks);
@@ -180,7 +189,9 @@ public sealed class SimConnectClient : IDisposable
                     var cbMs = TimeSpan.FromTicks(Interlocked.Read(ref _callbackTicks) - cbBefore).TotalMilliseconds;
                     OnError?.Invoke($"[SimConnect] dispatch pump took {sw.ElapsedMilliseconds} ms (receive callbacks {cbMs:F0} ms)");
                 }
+                pumps++;
             }
+            while (_msgEvent.WaitOne(0) && pumps < 500);
         }
         if (Interlocked.Exchange(ref _quitReported, 0) == 1) Disconnect();
     }

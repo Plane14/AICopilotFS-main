@@ -67,13 +67,35 @@ public sealed class SimAircraft : IDisposable
         _titleDefineId = _sc.CreateStringDataDefinition(("TITLE", DatumType.String256));
         _reqTitle = _sc.RequestData(_titleDefineId, period: Period.Second);
         _requestMap[_reqTitle] = "TITLE";
+
+        // Dedicated message pump: sleeps on the SimConnect message event and
+        // drains the queue independently of the control loop, so a slow Tick
+        // can never let inbound data back up (or vice versa).
+        _pumpCts = new CancellationTokenSource();
+        var pumpCt = _pumpCts.Token;
+        _pumpTask = Task.Run(() =>
+        {
+            while (!pumpCt.IsCancellationRequested)
+            {
+                try { Dispatch(50); }
+                catch (Exception ex) { OnError?.Invoke($"[SimConnect] pump error: {ex.Message}"); }
+            }
+        }, pumpCt);
     }
 
-    public void Stop() => _sc.Disconnect();
+    private CancellationTokenSource? _pumpCts;
+    private Task? _pumpTask;
 
-    public void Dispatch()
+    /// <summary>Stops the connection and the message pump.</summary>
+    public void Stop()
     {
-        _sc.Dispatch();
+        try { _pumpCts?.Cancel(); } catch { }
+        _sc.Disconnect();
+    }
+
+    public void Dispatch(int idleWaitMs = 0)
+    {
+        _sc.Dispatch(idleWaitMs);
         long version;
         lock (_stateLock)
         {
@@ -613,7 +635,13 @@ public sealed class SimAircraft : IDisposable
         return $"{asInt / 1000}.{asInt % 1000:D3}";
     }
 
-    public void Dispose() => _sc.Dispose();
+    public void Dispose()
+    {
+        Stop();
+        try { _pumpTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        _pumpCts?.Dispose();
+        _sc.Dispose();
+    }
 }
 
 internal static class NavigationStateExtensions
