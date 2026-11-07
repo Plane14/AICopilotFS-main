@@ -29,7 +29,21 @@ public sealed class AirportFacilityLoader : IDisposable
         _sc = sc;
         _sc.OnFacilityData += OnFacilityData;
         _sc.OnFacilityDataEnd += OnFacilityDataEnd;
+        // NOTE: the facility definition is NOT built here — this loader is
+        // constructed before the sim connection exists, and every
+        // AddToFacilityDefinition send would be silently dropped, leaving a
+        // definition the sim rejects with UnrecognizedId. It is built lazily
+        // on the first request, which always happens after connect.
+    }
+
+    private bool _definitionSent;
+
+    private void EnsureDefinition()
+    {
+        if (_definitionSent || _airportDefineId != 0) return;
+        if (!_sc.IsConnected) return; // retry on the next request
         BuildDefinition();
+        _definitionSent = true;
     }
 
     private void BuildDefinition()
@@ -92,6 +106,7 @@ public sealed class AirportFacilityLoader : IDisposable
     /// <summary>Requests the full ground network for an airport (ICAO, e.g. "KLAX"). Returns the request id.</summary>
     public uint RequestAirport(string icao)
     {
+        EnsureDefinition();
         var requestId = _nextRequestId++;
         var pending = new PendingRequest { Icao = icao };
         pending.Airport.Icao = icao;
@@ -103,6 +118,7 @@ public sealed class AirportFacilityLoader : IDisposable
     /// <summary>Requests the bare list of airports known to the sim (ICAO list).</summary>
     public uint RequestAirportList()
     {
+        EnsureDefinition();
         var requestId = _nextRequestId++;
         _sc.RequestFacilitiesList(FacilityListType.Airport, requestId);
         return requestId;
