@@ -124,7 +124,7 @@ public sealed class PilotEngine : IDisposable
     {
         _aircraft = new SimAircraft(paths);
         _facilities = new AirportFacilityLoader(_aircraft.SimConnect);
-        _planner = new ContinuousFlightPlanner(_facilities);
+        _planner = new ContinuousFlightPlanner(_facilities) { Logger = Log };
         _ap = new HybridAutopilot(_aircraft.SimConnect);
         _atcRequests = new AtcRequestEngine(_aircraft.SimConnect);
         _atcRadio = new AtcRadio(_aircraft.SimConnect);
@@ -769,16 +769,47 @@ public sealed class PilotEngine : IDisposable
         {
             if (!s.EnginesRunning)
             {
-                // Cold aircraft: try the starter until the engines catch or we give up.
-                if (_starterAttempts < 6 && now - _starterAttemptUtc > TimeSpan.FromSeconds(4))
+                // TOGGLE_STARTER is a toggle: firing it while the starter motor
+                // is already engaged turns it back OFF, so only engines whose
+                // starter is currently off may be toggled. A cold crank needs
+                // several seconds — retry slowly and give up rather than stall
+                // in Startup forever.
+                if (_starterAttempts < 8 && now - _starterAttemptUtc > TimeSpan.FromSeconds(6))
                 {
-                    // Fire the starter for every engine the aircraft reports.
-                    var engines = Math.Clamp(s.EngineCount, 1, 4);
+                    // NUMBER OF ENGINES can under-report on some add-on aircraft;
+                    // the package cfg (icao_engine_count) is the fallback floor.
+                    var engines = Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4);
+                    // STARTERn_SET is idempotent (starter on); TOGGLE_STARTERn
+                    // would switch a running starter back off on the next retry.
+                    // Turbine engines need SET_STARTERn_HELD as well to keep the
+                    // starter engaged through light-off.
+                    var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                                  _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase);
                     for (int e = 1; e <= engines; e++)
-                        _aircraft.SimConnect.FireEvent($"TOGGLE_STARTER{e}");
+                    {
+                        _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
+                        if (turbine) _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 1);
+                    }
                     _starterAttemptUtc = now;
                     _starterAttempts++;
                     Log($"[Pilot] Attempting engine start ({engines} engine(s)).");
+                }
+                // Release held starters once the engines are running so they
+                // cannot wind up against a lighted engine.
+                if (s.EnginesRunning && _starterAttempts > 0)
+                {
+                    var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                                  _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase);
+                    if (turbine)
+                        for (int e = 1; e <= Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4); e++)
+                            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 0);
+                    _starterAttempts = 0;
+                }
+                if (_starterAttempts >= 8)
+                {
+                    Log("[Pilot] WARNING: engines did not start after repeated attempts; continuing anyway.");
+                    SetPhase(FlightPhase.TaxiOut);
+                    BeginTaxiOut(s);
                 }
                 return;
             }
@@ -836,10 +867,33 @@ public sealed class PilotEngine : IDisposable
         if (pick is null) { Log("[Pilot] No suitable departure runway found."); return; }
         var (rw, name) = pick.Value;
         _departureRunwayName = name;
+        Log($"[Pilot] Departure runway {name} ({rw.LengthMeters:0} m). Ground graph: " +
+            $"{_departureAirport.Nodes.Count} nodes, {_departureAirport.HoldShortNodes.Count()} hold-shorts, " +
+            $"{_departureAirport.Nodes.Values.Sum(n => n.Edges.Count)} edges.");
 
         // Build the taxi route to the hold-short for that runway.
         var start = TaxiRouter.FindNearestNode(_departureAirport, s.Latitude, s.Longitude);
         if (start is null) { Log("[Pilot] No ground graph at departure airport; cannot taxi."); return; }
+        var holdShorts = TaxiRouter.HoldShortsFor(_departureAirport, name);
+        if (holdShorts.Count == 0)
+        {
+            Log($"[Pilot] No hold-short nodes serve runway {name} ({_departureAirport.HoldShortNodes.Count()} hold-short nodes total).");
+            var sample = _departureAirport.HoldShortNodes.Take(4)
+                .Select(n => $"#{n.Index} rw={n.RunwayNumber}/{n.RunwayDesignator} edges=[{string.Join(",", n.Edges.Where(e => e.PathType == TaxiPathType.Runway).Select(e => $"{e.RunwayNumber}/{e.RunwayDesignator}"))}]");
+            Log($"[Pilot] Hold-short sample: {string.Join(" | ", sample)}");
+        }
+        else
+        {
+            var probe = TaxiRouter.FindRoute(_departureAirport, start.Index, holdShorts[0].Index,
+                new TaxiConstraints
+                {
+                    RunwayName = name,
+                    HoldShortBefore = name,
+                    AircraftWeightLbs = (uint)s.GrossWeight,
+                });
+            if (!probe.Success)
+                Log($"[Pilot] Hold-short route probe failed: {probe.FailureReason} (weight {s.GrossWeight:0} lbs).");
+        }
         var holdShort = TaxiRouter.FindReachableHoldShort(_departureAirport, start.Index, name,
             new TaxiConstraints
             {
@@ -2120,6 +2174,7 @@ public sealed class PilotEngine : IDisposable
         _destinationAirport = dest;
         _departureRunwayName = null;
         _arrivalRunwayName = null;
+        _atcRequests.Reset(); // clearances from the previous leg do not carry over
         var ok = await BuildAndLoadRouteAsync(s, ct);
         if (ok) _legsFlown++;
         return ok;
@@ -2127,14 +2182,17 @@ public sealed class PilotEngine : IDisposable
 
     private double EstimateRangeNm(AircraftState s)
     {
+        // Published max range (flightchecklist.app quick-ref) caps the estimate;
+        // the fuel-flow model refines it downward when live fuel data exists.
+        var cap = _performance.MaxRangeNm > 0 ? _performance.MaxRangeNm : _planner.MaxRangeNm;
         // Still-air range ≈ fuel weight / fuel flow * speed. Rough but serviceable.
-        if (s.EngineFF.Length == 0 || s.EngineFF.All(f => f <= 0)) return _planner.MaxRangeNm;
+        if (s.EngineFF.Length == 0 || s.EngineFF.All(f => f <= 0)) return cap;
         var ffTotal = s.EngineFF.Sum();
         var fuelLb = s.TotalFuelWeight > 0 ? s.TotalFuelWeight : _performance.MaxFuelWeight;
-        if (ffTotal <= 0 || fuelLb <= 0) return _planner.MaxRangeNm;
+        if (ffTotal <= 0 || fuelLb <= 0) return cap;
         var hours = fuelLb / ffTotal * 0.85; // 85% usable
         var gs = Math.Max(s.GroundSpeed, cruiseSpeedKt());
-        return hours * gs * 0.9; // reserve
+        return Math.Min(hours * gs * 0.9, cap); // reserve
     }
 
     private void BeginTurnaround(AircraftState s)
@@ -2192,6 +2250,14 @@ public sealed class PilotEngine : IDisposable
             LoadChecklists();
             _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
             _planner.Kind = _aircraftKind;
+            // The TITLE SimVar falls back to a stale/default title when the
+            // package's aircraft.cfg has no title= field (deltas_c17 reports
+            // "Cessna 172" while actually being a C-17). The resolved cfg is
+            // authoritative once the package directory is known.
+            var displayTitle = !string.IsNullOrWhiteSpace(_performance.Title)
+                ? _performance.Title
+                : _aircraft.AircraftTitle;
+            lock (_lock) _status.AircraftTitle = displayTitle;
             lock (_lock) _status.AircraftKind = _aircraftKind;
             Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind} [{_aircraft.AircraftDirectory}]");
 
@@ -2204,6 +2270,7 @@ public sealed class PilotEngine : IDisposable
             {
                 Log($"[Pilot] {_aircraftKind}: water runways preferred for all legs.");
             }
+            PublishStatus();
         }
         catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
     }
@@ -2218,22 +2285,74 @@ public sealed class PilotEngine : IDisposable
         // The aircraft directory is already resolved by SimAircraft (the
         // AircraftLoaded path hint); pass it as the override so the parser
         // does not rescan every package root by title.
-        var title = _aircraft.AircraftTitle;
+        // The TITLE SimVar can be stale when the package cfg lacks a title=
+        // field; the parsed cfg identity is authoritative for matching.
+        var title = !string.IsNullOrWhiteSpace(_performance.Title)
+            ? _performance.Title
+            : _aircraft.AircraftTitle;
         if (string.IsNullOrWhiteSpace(title) || title.StartsWith("$$", StringComparison.Ordinal))
-            title = _performance.Title;
+            title = "";
         var set = ChecklistParser.ParseFromAircraft(title,
             rootOverride: string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory) ? null : _aircraft.AircraftDirectory);
+
+        // The package ships no readable checklist XML (encrypted VFS or
+        // third-party aircraft): consult the flightchecklist.app library —
+        // bundled copy first, then the per-user cache, then the live site.
+        // Runs on the identity worker thread, so blocking on the fetch is safe.
+        // The same page also carries the "Quick Reference" spec sheet, which
+        // replaces the .cfg-derived performance fields (title stays from the sim).
+        try
+        {
+            var bundle = FlightChecklistProvider.TryLoadBundleAsync(title, _performance.IcaoType,
+                CancellationToken.None).GetAwaiter().GetResult();
+            if (bundle?.Performance is not null)
+            {
+                MergeWebPerformance(bundle.Performance);
+                Log($"[Pilot] Specs from flightchecklist.app: range {_performance.MaxRangeNm:0}nm, " +
+                    $"ceil {_performance.CruisePerf.MaxCruiseAltitude:0}ft, weight {_performance.MaxGrossWeight:0}lb.");
+            }
+            if (bundle?.Checklists is { IsLoaded: true } web && !set.IsLoaded) set = web;
+        }
+        catch (Exception ex) { Log($"[Checklist] flightchecklist.app lookup failed: {ex.Message}"); }
+
         if (!set.IsLoaded)
         {
             var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
                           _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase) ||
                           _aircraftKind == AircraftKind.Rotorcraft;
-            var engines = _performance.EngineCount > 0 ? _performance.EngineCount : 1;
+            // The package cfg (icao_engine_count) is authoritative for how many
+            // engines the aircraft models; NUMBER OF ENGINES can under-report on
+            // add-ons, so it is only a fallback when the cfg has no count.
+            var engines = _performance.EngineCount > 0
+                ? _performance.EngineCount
+                : Math.Max(1, _aircraft.GetSnapshot().EngineCount);
             set = GenericChecklists.Create(title, turbine, engines);
         }
         foreach (var note in set.Notes.Take(5)) Log($"[Checklist] {note}");
         _checklists.Load(set);
         Log($"[Checklist] Loaded {set.Lists.Count} lists ({set.Format}) from '{_aircraft.AircraftDirectory}'.");
+    }
+
+    /// <summary>
+    /// Overlays the flightchecklist.app "Quick Reference" spec sheet onto the
+    /// cfg-parsed performance. Per product decision the web specs replace the
+    /// .cfg performance data; only Title/IcaoType/Category (aircraft identity)
+    /// are kept from the simobject cfg. Fields the site does not publish keep
+    /// their cfg values.
+    /// </summary>
+    private void MergeWebPerformance(AircraftPerformance web)
+    {
+        var p = _performance;
+        if (web.EngineCount > 0) p.EngineCount = web.EngineCount;
+        if (!string.IsNullOrEmpty(web.EngineType)) p.EngineType = web.EngineType;
+        if (web.MaxThrustPerEngine > 0) p.MaxThrustPerEngine = web.MaxThrustPerEngine;
+        if (web.Vno > 0) p.Vno = web.Vno;
+        if (web.MaxRangeNm > 0) p.MaxRangeNm = web.MaxRangeNm;
+        if (web.MaxGrossWeight > 0) p.MaxGrossWeight = web.MaxGrossWeight;
+        if (web.MaxTakeoffWeight > 0) p.MaxTakeoffWeight = web.MaxTakeoffWeight;
+        if (web.MaxLandingWeight > 0) p.MaxLandingWeight = web.MaxLandingWeight;
+        if (web.CruisePerf.DefaultCruiseSpeed > 0) p.CruisePerf.DefaultCruiseSpeed = web.CruisePerf.DefaultCruiseSpeed;
+        if (web.CruisePerf.MaxCruiseAltitude > 0) p.CruisePerf.MaxCruiseAltitude = web.CruisePerf.MaxCruiseAltitude;
     }
 
     private void OnStateUpdated(AircraftState s)

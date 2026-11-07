@@ -24,4 +24,8 @@
     <ProjectReference Include="..\..\src\MSFS2024AIPilot.Core\MSFS2024AIPilot.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="flightchecklist_chunk.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

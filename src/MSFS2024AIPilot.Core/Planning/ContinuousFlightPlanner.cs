@@ -38,6 +38,8 @@ public sealed class ContinuousFlightPlanner
     public string? ExcludeIcao { get; set; }
     /// <summary>Operational class of the aircraft — filters destination suitability.</summary>
     public AircraftKind Kind { get; set; } = AircraftKind.Airplane;
+    /// <summary>Optional diagnostic sink for pick progress.</summary>
+    public Action<string>? Logger { get; set; }
 
     public IReadOnlyList<string> KnownAirports { get { lock (_lock) return _airportIcaos.ToList(); } }
 
@@ -159,11 +161,15 @@ public sealed class ContinuousFlightPlanner
             // No coordinates received (older sim): fall back to blind sampling.
             inRange.AddRange(candidates.Select(c => (c, -1.0)));
         }
+        Logger?.Invoke($"[Planner] {candidates.Count} airports listed, {inRange.Count} in {MinRangeNm:0}-{range:0}nm band, range cap {range:0}nm.");
 
         var effectiveKind = kind ?? Kind;
         var rng = new Random();
         var shuffled = inRange.OrderBy(_ => rng.Next()).ToList();
         var tried = 0;
+        var loaded = 0;
+        var unsuitable = 0;
+        var outOfBand = 0;
         var deadline = DateTime.UtcNow + timeout;
 
         foreach (var (icao, knownDist) in shuffled)
@@ -174,8 +180,9 @@ public sealed class ContinuousFlightPlanner
             if (_cache.TryGetValue(icao, out var cached))
             {
                 var cd = GeoMath.DistanceNm(lat, lon, cached.ReferenceLatitude, cached.ReferenceLongitude);
-                if (cd < MinRangeNm || cd > range) continue;
+                if (cd < MinRangeNm || cd > range) { outOfBand++; continue; }
                 if (IsSuitable(cached, effectiveKind)) return cached;
+                unsuitable++;
                 continue;
             }
 
@@ -184,11 +191,16 @@ public sealed class ContinuousFlightPlanner
             if (tried > 60) break;
             var airport = await LoadAirportAsync(icao, TimeSpan.FromSeconds(15), ct);
             if (airport is null) continue;
+            loaded++;
             var dist = knownDist >= 0 ? knownDist
                 : GeoMath.DistanceNm(lat, lon, airport.ReferenceLatitude, airport.ReferenceLongitude);
-            if (dist < MinRangeNm || dist > range) continue;
+            if (dist < MinRangeNm || dist > range) { outOfBand++; continue; }
             if (IsSuitable(airport, effectiveKind)) return airport;
+            unsuitable++;
+            if (unsuitable == 1 || unsuitable % 10 == 0)
+                Logger?.Invoke($"[Planner] {icao}: loaded but unsuitable (runways={airport.Runways.Count}, closed={airport.IsClosed}, kind={effectiveKind}).");
         }
+        Logger?.Invoke($"[Planner] No destination: tried {tried} loads ({loaded} ok), {unsuitable} unsuitable, {outOfBand} out-of-band.");
         return null;
     }
 

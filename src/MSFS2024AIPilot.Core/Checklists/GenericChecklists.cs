@@ -40,7 +40,8 @@ public static class GenericChecklists
         Text(set, ChecklistStep.PREFLIGHT_GATE, "FUEL PUMP", "ON");
         if (turbine) Text(set, ChecklistStep.PREFLIGHT_GATE, "THROTTLES", "IDLE");
         else Text(set, ChecklistStep.PREFLIGHT_GATE, "MIXTURE", "IDLE CUT-OFF");
-        Add(set, ChecklistStep.PREFLIGHT_GATE, EngineStart(engineCount));
+        foreach (var engineStart in EngineStart(engineCount, turbine))
+            Add(set, ChecklistStep.PREFLIGHT_GATE, engineStart);
         Text(set, ChecklistStep.PREFLIGHT_GATE, "GENERATOR", "ON");
         Text(set, ChecklistStep.PREFLIGHT_GATE, "PITOT HEAT", "AS REQUIRED");
 
@@ -123,17 +124,65 @@ public static class GenericChecklists
         return set;
     }
 
-    private static ChecklistItem EngineStart(int engineCount)
+    private static IEnumerable<ChecklistItem> EngineStart(int engineCount, bool turbine)
     {
-        var item = new ChecklistItem
-        {
-            Subject = "ENGINE START",
-            Expectation = "AUTO",
-            Kind = ChecklistItemKind.Set,
-            Actions = { new ChecklistAction { EventId = "ENGINE_AUTO_START", Condition = ActionCondition.TestValueFalse } }
-        };
+        // One item per engine: STARTERn_SET is an idempotent set event (unlike
+        // TOGGLE_STARTERn, which the executor's retry loop would toggle back
+        // off while the engine is still cranking). Turbine engines need BOTH
+        // STARTERn_SET and SET_STARTERn_HELD to crank; the HELD event is
+        // released once combustion confirms so the starter cannot wind up.
         for (int e = 1; e <= engineCount; e++)
-            item.Tests.Add(ConditionNode.Verify($"GENERAL ENG COMBUSTION:{e}", "bool", true));
-        return item;
+        {
+            var item = new ChecklistItem
+            {
+                Subject = $"ENGINE {e} START",
+                Expectation = "AUTO",
+                Kind = ChecklistItemKind.Set,
+                // A turbine light-off can take a minute; beyond that the engine
+                // is not going to start and the gate must not stall for hours.
+                TimeoutSeconds = 75,
+                Tests =
+                {
+                    // Turbines: GENERAL ENG COMBUSTION stays false on some
+                    // add-ons; fuel flow is the reliable "burning" indicator.
+                    turbine
+                        ? new ConditionNode
+                        {
+                            Type = CheckOpType.GreaterOrEqual,
+                            Operands =
+                            {
+                                new SimVarNode { Name = $"TURB ENG FUEL FLOW PPH:{e}", Units = "pounds per hour" },
+                                new SimVarNode { Constant = 5 }
+                            }
+                        }
+                        : ConditionNode.Verify($"GENERAL ENG COMBUSTION:{e}", "bool", true)
+                },
+                Actions =
+                {
+                    new ChecklistAction
+                    {
+                        EventId = $"STARTER{e}_SET",
+                        EventParam = 1,
+                        Condition = ActionCondition.TestValueFalse
+                    }
+                }
+            };
+            if (turbine)
+            {
+                item.Actions.Add(new ChecklistAction
+                {
+                    EventId = $"SET_STARTER{e}_HELD",
+                    EventParam = 1,
+                    Condition = ActionCondition.TestValueFalse
+                });
+                item.Actions.Add(new ChecklistAction
+                {
+                    EventId = $"SET_STARTER{e}_HELD",
+                    EventParam = 0,
+                    Condition = ActionCondition.TestValueTrue
+                });
+            }
+            yield return item;
+        }
     }
 }

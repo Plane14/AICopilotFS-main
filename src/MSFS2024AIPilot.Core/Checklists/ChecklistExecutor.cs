@@ -169,7 +169,7 @@ public sealed class ChecklistExecutor
             if (_needsData && !_dataSeen)
             {
                 _status = "waiting for data";
-                if (_elapsed >= _options.ItemTimeoutSeconds) return Done("no data from the sim");
+                if (_elapsed >= TimeoutFor(_item)) return Done("no data from the sim");
                 return ItemOutcome.Running;
             }
 
@@ -190,7 +190,7 @@ public sealed class ChecklistExecutor
         if (_needsData && !_dataSeen)
         {
             _status = "waiting for data";
-            if (_elapsed >= _options.ItemTimeoutSeconds) return Done("no data from the sim");
+            if (_elapsed >= TimeoutFor(_item)) return Done("no data from the sim");
             return ItemOutcome.Running;
         }
 
@@ -258,7 +258,7 @@ public sealed class ChecklistExecutor
         if (_item.Actions.Count == 0)
         {
             _status = "waiting for condition";
-            if (_elapsed >= _options.ItemTimeoutSeconds) return Done("timeout waiting for condition");
+            if (_elapsed >= TimeoutFor(_item)) return Done("timeout waiting for condition");
             return ItemOutcome.Running;
         }
 
@@ -277,7 +277,7 @@ public sealed class ChecklistExecutor
             CommandActions();
         }
 
-        if (_elapsed >= _options.ItemTimeoutSeconds)
+        if (_elapsed >= TimeoutFor(_item))
         {
             // Either the events did their work and the state then confirmed - impossible
             // here - or the command never took and the item is reported as what it is: a
@@ -298,6 +298,9 @@ public sealed class ChecklistExecutor
             : "retrying";
         return ItemOutcome.Running;
     }
+
+    private double TimeoutFor(ChecklistItem? item)
+        => item?.TimeoutSeconds ?? _options.ItemTimeoutSeconds;
 
     /// <summary>
     /// True while the item still has an event it has not fired. A toggle event is one: it
@@ -339,7 +342,7 @@ public sealed class ChecklistExecutor
         if (_fires > 0 && _dwell <= 0 && _satisfiedFor >= _item.DurationSeconds)
             return Done($"OK: {_item.Display}");
 
-        if (_elapsed >= _options.ItemTimeoutSeconds)
+        if (_elapsed >= TimeoutFor(_item))
             return Done($"timeout after {_fires} attempts");
 
         _status = _fires > 0 ? "commanding" : "no actionable event";

@@ -144,6 +144,8 @@ public sealed class ChecklistItem
     public List<ConditionNode> Tests = new();
     public List<ChecklistAction> Actions = new();
     public double DurationSeconds;
+    /// <summary>Per-item timeout override; null uses the executor default.</summary>
+    public double? TimeoutSeconds;
     public bool Once;
     public bool Facultative;
     /// Set for legacy text items: the resolver output, re-resolved at execution
@@ -194,6 +196,8 @@ public enum ChecklistSetFormat
     Msfs2024Xml,
     /// Aircraft ships the legacy &lt;Checklist&gt;&lt;Group&gt;&lt;List&gt; text format.
     LegacyXml,
+    /// Built from flightchecklist.app's public checklist pages (no package XML available).
+    WebJson,
     /// Built-in procedural stand-in so the AI can still run a full flow.
     Generic
 }
@@ -209,7 +213,7 @@ public sealed class AircraftChecklistSet
 
     public bool IsLoaded => Lists.Count > 0;
     public bool IsFallback => Format == ChecklistSetFormat.Generic;
-    public bool IsAircraftSpecific => Format is ChecklistSetFormat.Msfs2024Xml or ChecklistSetFormat.LegacyXml;
+    public bool IsAircraftSpecific => Format is ChecklistSetFormat.Msfs2024Xml or ChecklistSetFormat.LegacyXml or ChecklistSetFormat.WebJson;
 
     public ChecklistList? Find(ChecklistStep step) => Lists.Find(l => l.Step == step);
     public IEnumerable<ChecklistItem> AllItems => Lists.SelectMany(l => l.Items);

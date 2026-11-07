@@ -196,11 +196,10 @@ public sealed class AirportFacilityLoader : IDisposable
     private static void ParseRunway(FacilityDataRecord rec, PendingRequest req)
     {
         var r = new FacilityPayloadReader(rec.Payload);
-        // Canonical runway payload: ILS region/type pairs first, then geometry.
-        var primaryIlsRegion = r.ReadString(8);
-        var primaryIlsType = (char)r.ReadInt32();
-        var secondaryIlsRegion = r.ReadString(8);
-        var secondaryIlsType = (char)r.ReadInt32();
+        // Canonical runway payload order (MSFS 2024 facilities docs): geometry
+        // first, then surface, then the primary/secondary ILS blocks, then
+        // lights and the per-end flags. PRIMARY/SECONDARY_THRESHOLD are child
+        // STRUCT records we do not declare, so they never appear in the payload.
         var rw = new RunwayInfo
         {
             Latitude = r.ReadFloat64(),
@@ -214,13 +213,13 @@ public sealed class AirportFacilityLoader : IDisposable
             TrueSlopeDegrees = r.ReadFloat32(),
             Surface = r.ReadInt32(),
             PrimaryIlsIcao = r.ReadString(8),
-            PrimaryIlsRegion = primaryIlsRegion,
-            PrimaryIlsType = primaryIlsType,
+            PrimaryIlsRegion = r.ReadString(8),
+            PrimaryIlsType = (char)r.ReadInt32(),
             PrimaryNumber = r.ReadInt32(),
             PrimaryDesignator = r.ReadInt32(),
             SecondaryIlsIcao = r.ReadString(8),
-            SecondaryIlsRegion = secondaryIlsRegion,
-            SecondaryIlsType = secondaryIlsType,
+            SecondaryIlsRegion = r.ReadString(8),
+            SecondaryIlsType = (char)r.ReadInt32(),
             SecondaryNumber = r.ReadInt32(),
             SecondaryDesignator = r.ReadInt32(),
             EdgeLights = r.ReadInt8(),
@@ -232,8 +231,6 @@ public sealed class AirportFacilityLoader : IDisposable
             SecondaryTakeoff = r.ReadInt8() != 0,
             SecondaryLanding = r.ReadInt8() != 0,
         };
-        // PRIMARY/SECONDARY_THRESHOLD are child blocks in the facility API,
-        // not flat fields — thresholds are derived from runway geometry.
         req.Airport.Runways.Add(rw);
     }
 

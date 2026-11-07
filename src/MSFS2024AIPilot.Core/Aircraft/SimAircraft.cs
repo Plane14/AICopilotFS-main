@@ -159,6 +159,7 @@ public sealed class SimAircraft : IDisposable
         for (uint e = 1; e <= MaxEngines; e++)
         {
             layout.Add(("ENGINES", $"GENERAL ENG COMBUSTION:{e}", "bool"));
+            layout.Add(("ENGINES", $"GENERAL ENG STARTER:{e}", "bool"));
             layout.Add(("ENGINES", $"GENERAL ENG RPM:{e}", "rpm"));
             layout.Add(("ENGINES", $"TURB ENG N1:{e}", "percent"));
             layout.Add(("ENGINES", $"TURB ENG N2:{e}", "percent"));
@@ -518,17 +519,22 @@ public sealed class SimAircraft : IDisposable
                 case "ENGINES":
                 {
                     _state.EngineCount = Math.Max(1, (int)Math.Round(D(0)));
-                    int count = Math.Min(MaxEngines, Math.Max(1, _state.EngineCount));
+                    // Decode every requested engine slot: NUMBER OF ENGINES can
+                    // under-report on add-on aircraft, and hiding running engines
+                    // would stall startup detection.
+                    int count = MaxEngines;
                     var combustion = new double[count]; var n1 = new double[count];
                     var n2 = new double[count]; var ff = new double[count]; var thr = new double[count];
+                    var starter = new bool[count];
                     for (int e = 0; e < count && e < MaxEngines; e++)
                     {
-                        int b = 1 + e * 6;
-                        combustion[e] = D(b); n1[e] = D(b + 2); n2[e] = D(b + 3);
-                        ff[e] = D(b + 4); thr[e] = D(b + 5);
+                        int b = 1 + e * 7;
+                        combustion[e] = D(b); starter[e] = D(b + 1) > 0.5; n1[e] = D(b + 3);
+                        n2[e] = D(b + 4); ff[e] = D(b + 5); thr[e] = D(b + 6);
                     }
                     _state.EngineN1 = n1; _state.EngineN2 = n2; _state.EngineFF = ff; _state.EngineThrottle = thr;
-                    _state.EnginesRunning = combustion.Any(c => c > 0.5) || n1.Any(n => n > 5);
+                    _state.EngineStarter = starter;
+                    _state.EnginesRunning = combustion.Any(c => c > 0.5) || n1.Any(n => n > 5) || ff.Any(f => f > 1);
                     break;
                 }
                 case "ENGINE_LIMITS":

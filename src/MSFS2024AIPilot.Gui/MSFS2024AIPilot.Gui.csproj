@@ -14,4 +14,10 @@
     <ProjectReference Include="..\MSFS2024AIPilot.Core\MSFS2024AIPilot.Core.csproj" />
   </ItemGroup>
 
+  <!-- Pre-fetched flightchecklist.app data (checklists + quick-ref specs) so the
+       app works fully offline. Regenerate with tools/FlightChecklistFetcher. -->
+  <ItemGroup>
+    <Content Include="flightchecklists\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

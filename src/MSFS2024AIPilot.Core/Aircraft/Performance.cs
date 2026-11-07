@@ -34,6 +34,8 @@ public sealed class AircraftPerformance
     public double EmptyWeight { get; set; }
     public double MaxFuelWeight { get; set; }
     public double FuelCapacityGallons { get; set; }
+    /// <summary>Published max still-air range in nautical miles (external spec sources).</summary>
+    public double MaxRangeNm { get; set; }
 
     public double WingSpan { get; set; }           // feet
     public double WingArea { get; set; }           // sq ft
