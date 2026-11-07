@@ -110,8 +110,17 @@ public sealed class SimConnectClient : IDisposable
         OnDisconnected?.Invoke();
     }
 
+    /// <summary>
+    /// Serialises <see cref="SimConnect_CallDispatch"/> against
+    /// <see cref="DisconnectQuietly"/> only — NOT against sends. Holding the
+    /// send lock while pumping messages let a stalled dispatch freeze every
+    /// SimConnect caller (control loop, ATC, facility loads).
+    /// </summary>
+    private readonly object _dispatchLock = new();
+
     private void DisconnectQuietly()
     {
+        lock (_dispatchLock)
         lock (_lock)
         {
             if (!_connected) return;
@@ -139,6 +148,16 @@ public sealed class SimConnectClient : IDisposable
             if (_recvDelegate is null || !_connected || _handle == IntPtr.Zero) return;
             handle = _handle;
             context = _selfHandle.IsAllocated ? GCHandle.ToIntPtr(_selfHandle) : IntPtr.Zero;
+        }
+        // _dispatchLock keeps Disconnect from closing the handle mid-pump;
+        // _lock stays free so sends from other threads are never blocked by
+        // message processing.
+        lock (_dispatchLock)
+        {
+            lock (_lock)
+            {
+                if (!_connected || _handle != handle) return;
+            }
             SimConnect_CallDispatch(handle, _recvDelegate, context);
         }
         if (Interlocked.Exchange(ref _quitReported, 0) == 1) Disconnect();

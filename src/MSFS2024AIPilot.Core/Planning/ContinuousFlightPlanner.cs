@@ -101,8 +101,10 @@ public sealed class ContinuousFlightPlanner
         _loader.OnAirportLoadedForRequest += Handler;
         try
         {
-            requestId = _loader.RequestAirport(icao);
+            // Start the timeout BEFORE sending: RequestAirport can block on the
+            // SimConnect send lock, and a stalled send must still time out.
             var delay = Task.Delay(timeout, ct);
+            requestId = _loader.RequestAirport(icao);
             var done = await Task.WhenAny(tcs.Task, delay);
             if (done != tcs.Task) return null;
             var airport = await tcs.Task;

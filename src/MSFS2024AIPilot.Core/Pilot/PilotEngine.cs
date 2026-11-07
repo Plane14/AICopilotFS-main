@@ -320,8 +320,29 @@ public sealed class PilotEngine : IDisposable
     {
         _loopCts?.Cancel();
         _loopCts = new CancellationTokenSource();
+        _lastLoopHeartbeatUtc = DateTime.UtcNow;
         _loopTask = Task.Run(() => LoopAsync(_loopCts.Token));
+        var ct = _loopCts.Token;
+        // Watchdog on its own task: if Dispatch/Tick stalls (e.g. a blocked
+        // SimConnect call) the loop itself can never report it.
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(15000, ct); } catch { return; }
+                var silent = DateTime.UtcNow - _lastLoopHeartbeatUtc;
+                if (silent > TimeSpan.FromSeconds(20) && !_watchdogWarned)
+                {
+                    _watchdogWarned = true;
+                    Log($"[Pilot] WARNING: control loop silent for {silent.TotalSeconds:F0}s — stalled in Tick stage '{_tickStage}'.");
+                }
+                else if (silent <= TimeSpan.FromSeconds(20)) _watchdogWarned = false;
+            }
+        }, ct);
     }
+
+    private DateTime _lastLoopHeartbeatUtc = DateTime.MinValue;
+    private bool _watchdogWarned;
 
     private async Task LoopAsync(CancellationToken ct)
     {
@@ -332,6 +353,7 @@ public sealed class PilotEngine : IDisposable
             {
                 _aircraft.Dispatch();
                 var now = DateTime.UtcNow;
+                _lastLoopHeartbeatUtc = now;
                 var dt = Math.Clamp((now - last).TotalSeconds, 0.01, 0.5);
                 last = now;
                 Tick(dt, now);
@@ -354,14 +376,18 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Per-frame logic ----------------
 
+    private volatile string _tickStage = "start";
+
     private void Tick(double dt, DateTime now)
     {
+        _tickStage = "snapshot";
         var s = _aircraft.GetSnapshot();
         _turbulence.Update(s.GLoad, dt, quiet: s.OnGround);
         var turbulence = _turbulence.Level;
 
         // Traffic awareness: refresh the object-type request and assess the
         // runway this phase cares about (departure on the ground, arrival on final).
+        _tickStage = "traffic";
         _traffic.Refresh();
         _trafficAssessment = _traffic.Assess(s, TrafficRunwayFor(s));
         PublishTrafficStatus();
@@ -403,11 +429,14 @@ public sealed class PilotEngine : IDisposable
         }
 
         // Checklist auto-advance: fire bound events and step through items.
+        _tickStage = "checklist";
         AdvanceChecklist(s, now);
 
         // Phase machine.
+        _tickStage = "phase";
         AdvancePhase(s, now);
         ExecutePhase(s, dt, now, turbulence);
+        _tickStage = "done";
 
         // Periodic flight diagnostics (~every 5 s while AI is active).
         if (now - _lastDiagUtc > TimeSpan.FromSeconds(5))
