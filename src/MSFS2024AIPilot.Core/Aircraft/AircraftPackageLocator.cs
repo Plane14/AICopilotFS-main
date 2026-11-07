@@ -47,12 +47,117 @@ public static class AircraftPackageLocator
 
     private static string? LocateWithin(string title, string root)
     {
+        // Collect every title match and keep the best-scoring package instead
+        // of the first one found: AI-traffic repaint packages (aigaim_*) carry
+        // the original aircraft title in their cfg, so a first-match scan
+        // resolves the user aircraft to a repaint that has no checklists.
+        string? best = null;
+        string? bestFallback = null;
+        var bestScore = int.MinValue;
+        var fallbackScore = int.MinValue;
         foreach (var cfg in EnumerateAircraftConfigs(root))
         {
             var dir = Path.GetDirectoryName(cfg);
-            if (dir is not null && MatchesTitle(cfg, title)) return dir;
+            if (dir is null) continue;
+            var score = MatchScore(cfg, title);
+            if (score == int.MinValue) continue;
+            if (IsAiRepaintPackage(cfg))
+            {
+                if (score > fallbackScore) { fallbackScore = score; bestFallback = dir; }
+            }
+            else if (score > bestScore) { bestScore = score; best = dir; }
         }
-        return null;
+        return best ?? bestFallback;
+    }
+
+    /// <summary>
+    /// aigaim_* folders are Asobo's AI-traffic repaints of the real aircraft;
+    /// they duplicate the title but are never the user aircraft.
+    /// </summary>
+    private static bool IsAiRepaintPackage(string cfgPath)
+    {
+        var dir = Path.GetDirectoryName(cfgPath);
+        while (!string.IsNullOrEmpty(dir))
+        {
+            var name = Path.GetFileName(dir);
+            if (name.StartsWith("aigaim", StringComparison.OrdinalIgnoreCase)) return true;
+            dir = Path.GetDirectoryName(dir);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Scores how well a candidate aircraft.cfg matches the sim title.
+    /// Exact normalized equality beats substring containment; a "title=" key
+    /// beats derived atc_type/atc_model or folder-slug candidates. Returns
+    /// <see cref="int.MinValue"/> when nothing matches.
+    /// </summary>
+    private static int MatchScore(string cfgPath, string title)
+    {
+        var normalizedTitle = Normalize(title);
+        if (normalizedTitle.Length == 0) return 0;
+        // The package folder name is a slug of the title in many packages —
+        // and for encrypted packages (VFS stubs) it is the ONLY identity
+        // signal, since the cfg itself cannot be read.
+        var dirName = Path.GetFileName(Path.GetDirectoryName(cfgPath));
+        var folderScore = int.MinValue;
+        if (!string.IsNullOrEmpty(dirName))
+        {
+            folderScore = ScoreCandidate(dirName.Replace('_', ' ').Replace('-', ' '), normalizedTitle, 40);
+            folderScore = Math.Max(folderScore, ScoreFolderTokens(dirName, title, normalizedTitle));
+        }
+        try
+        {
+            var best = folderScore;
+            var atcType = "";
+            var atcModel = "";
+            foreach (var line in File.ReadLines(cfgPath))
+            {
+                var t = line.Trim();
+                var eq = t.IndexOf('=');
+                if (eq < 0) continue;
+                var key = t[..eq].Trim();
+                var value = t[(eq + 1)..].Trim().Trim('"');
+                if (key.Equals("title", StringComparison.OrdinalIgnoreCase))
+                    best = Math.Max(best, ScoreCandidate(value, normalizedTitle, 100));
+                else if (key.Equals("icao_type_designator", StringComparison.OrdinalIgnoreCase))
+                    best = Math.Max(best, ScoreCandidate(value, normalizedTitle, 60));
+                if (key.Equals("atc_type", StringComparison.OrdinalIgnoreCase)) atcType = value;
+                if (key.Equals("atc_model", StringComparison.OrdinalIgnoreCase)) atcModel = value;
+            }
+            if (atcType.Length > 0 && atcModel.Length > 0)
+                best = Math.Max(best, ScoreCandidate(atcType + " " + atcModel, normalizedTitle, 80));
+            return best;
+        }
+        catch { }
+        return folderScore;
+    }
+
+    private static int ScoreCandidate(string candidate, string normalizedTitle, int weight)
+    {
+        var n = Normalize(candidate);
+        if (n.Length == 0) return int.MinValue;
+        if (n == normalizedTitle) return weight + 1000;
+        if (n.Contains(normalizedTitle) || normalizedTitle.Contains(n)) return weight;
+        return int.MinValue;
+    }
+
+    /// <summary>
+    /// Weak folder-slug evidence for packages whose cfg cannot be read (VFS
+    /// encrypted stubs): scores title words that appear inside slug tokens.
+    /// "Cessna 172" against "asobo_c172sp" earns partial credit via "172".
+    /// </summary>
+    private static int ScoreFolderTokens(string dirName, string title, string normalizedTitle)
+    {
+        var slug = Normalize(dirName.Replace('_', ' ').Replace('-', ' '));
+        if (slug.Length == 0) return int.MinValue;
+        var words = title.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(w => Normalize(w)).Where(w => w.Length >= 2).ToList();
+        if (words.Count == 0) return int.MinValue;
+        var hits = words.Count(w => slug.Contains(w));
+        // Require at least one hit and scale by coverage; model numbers are
+        // the strongest signal, so a single hit still scores.
+        return hits == 0 ? int.MinValue : 20 + 20 * hits / words.Count;
     }
 
     private static string? LocateAcrossRoots(string title, SimulatorPathsConfig? config)
@@ -106,48 +211,6 @@ public static class AircraftPackageLocator
                 queue.Enqueue((s.FullName, depth + 1));
             }
         }
-    }
-
-    internal static bool MatchesTitle(string cfgPath, string title)
-    {
-        try
-        {
-            var normalizedTitle = Normalize(title);
-            // An empty title means the caller already pointed at the package
-            // (the AircraftLoaded path hint): the first config found wins.
-            if (normalizedTitle.Length == 0) return true;
-            // aircraft.cfg has no single guaranteed identity key: packages variously
-            // publish "title", atc_type/atc_model, or only the ICAO designator, so
-            // every candidate string is collected and matched against the sim title.
-            var candidates = new List<string>();
-            var atcType = "";
-            var atcModel = "";
-            foreach (var line in File.ReadLines(cfgPath))
-            {
-                var t = line.Trim();
-                var eq = t.IndexOf('=');
-                if (eq < 0) continue;
-                var key = t[..eq].Trim();
-                var value = t[(eq + 1)..].Trim().Trim('"');
-                if (key.Equals("title", StringComparison.OrdinalIgnoreCase) ||
-                    key.Equals("icao_type_designator", StringComparison.OrdinalIgnoreCase))
-                    candidates.Add(value);
-                if (key.Equals("atc_type", StringComparison.OrdinalIgnoreCase)) atcType = value;
-                if (key.Equals("atc_model", StringComparison.OrdinalIgnoreCase)) atcModel = value;
-            }
-            if (atcType.Length > 0 && atcModel.Length > 0)
-                candidates.Add(atcType + " " + atcModel);
-            // The package folder name is a slug of the title in many packages.
-            var dirName = Path.GetFileName(Path.GetDirectoryName(cfgPath));
-            if (!string.IsNullOrEmpty(dirName)) candidates.Add(dirName.Replace('_', ' ').Replace('-', ' '));
-            foreach (var c in candidates)
-            {
-                var n = Normalize(c);
-                if (n.Length > 0 && (n.Contains(normalizedTitle) || normalizedTitle.Contains(n))) return true;
-            }
-        }
-        catch { }
-        return false;
     }
 
     internal static string Normalize(string s)

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using MSFS2024AIPilot.Core.Environment;
 using MSFS2024AIPilot.Core.Paths;
@@ -360,7 +361,28 @@ public sealed class SimAircraft : IDisposable
         var airPath = data.String;
         var dir = Path.GetDirectoryName(airPath);
         if (string.IsNullOrEmpty(dir)) return;
-        UpdateAircraftIdentity(dir, _aircraftTitle);
+        // Resolution scans package roots and reads cfg files - too slow for
+        // the dispatch pump, so it runs on a worker thread.
+        QueueIdentityWork(() => UpdateAircraftIdentity(dir, _aircraftTitle));
+    }
+
+    private int _identityWorkQueued;
+
+    /// <summary>
+    /// Runs aircraft-identity resolution off the SimConnect pump thread.
+    /// Package scans and cfg reads can take tens of seconds on the VFS
+    /// projection; doing them inside a receive callback froze the whole
+    /// message pump (and GetSnapshot) for the duration.
+    /// </summary>
+    private void QueueIdentityWork(Action work)
+    {
+        if (Interlocked.Exchange(ref _identityWorkQueued, 1) == 1) return;
+        _ = Task.Run(() =>
+        {
+            try { work(); }
+            catch { /* identity resolution must never take the pump down */ }
+            finally { Interlocked.Exchange(ref _identityWorkQueued, 0); }
+        });
     }
 
     private void OnStringDataReceived(StringSimObjectData data)
@@ -377,6 +399,7 @@ public sealed class SimAircraft : IDisposable
             var title = OrNull(0);
             title = AircraftPackageLocator.CleanTitle(title);
             if (string.IsNullOrWhiteSpace(title)) return;
+            var needsDir = false;
             lock (_stateLock)
             {
                 if (!string.Equals(title, _aircraftTitle, StringComparison.OrdinalIgnoreCase))
@@ -384,16 +407,10 @@ public sealed class SimAircraft : IDisposable
                     _aircraftTitle = title;
                     OnAircraftTitleChanged?.Invoke(_aircraftTitle);
                 }
-                if (string.IsNullOrWhiteSpace(_aircraftDirectory))
-                {
-                    var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle, null, _paths);
-                    if (!string.IsNullOrWhiteSpace(dir))
-                    {
-                        _aircraftDirectory = dir;
-                        OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
-                    }
-                }
+                needsDir = string.IsNullOrWhiteSpace(_aircraftDirectory);
             }
+            if (needsDir)
+                QueueIdentityWork(() => UpdateAircraftIdentity(null, _aircraftTitle));
         }
         else if (data.DefineId == _atcTextDefineId)
         {
@@ -417,23 +434,40 @@ public sealed class SimAircraft : IDisposable
 
     private void UpdateAircraftIdentity(string? dirHint, string? titleHint)
     {
+        // Runs on a worker thread (QueueIdentityWork): the locate scan and cfg
+        // reads are too slow for the dispatch pump. Resolve first, then publish
+        // under the state lock so GetSnapshot never observes a half update.
         string? resolvedDir = null;
         if (!string.IsNullOrWhiteSpace(dirHint))
             resolvedDir = AircraftPackageLocator.LocateAircraftDirectory("", dirHint, _paths);
-        if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleHint))
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint, null, _paths);
-        if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
-        {
-            _aircraftDirectory = resolvedDir;
-            OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
-        }
+        string? currentTitle;
+        lock (_stateLock) currentTitle = _aircraftTitle;
+        var titleForScan = string.IsNullOrWhiteSpace(currentTitle) ? titleHint : currentTitle;
+        if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleForScan))
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleForScan, null, _paths);
 
-        var title = resolvedDir is null ? null : ExtractTitleFromConfig(resolvedDir) ?? titleHint;
-        if (!string.IsNullOrWhiteSpace(title) && !string.Equals(_aircraftTitle, title, StringComparison.OrdinalIgnoreCase))
+        string? resolvedTitle = null;
+        string? eventDir = null;
+        string? eventTitle = null;
+        lock (_stateLock)
         {
-            _aircraftTitle = title;
-            OnAircraftTitleChanged?.Invoke(_aircraftTitle);
+            if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
+            {
+                _aircraftDirectory = resolvedDir;
+                eventDir = resolvedDir;
+            }
+            resolvedTitle = resolvedDir is null ? null : ExtractTitleFromConfig(resolvedDir) ?? titleHint;
+            if (!string.IsNullOrWhiteSpace(resolvedTitle) &&
+                !string.Equals(_aircraftTitle, resolvedTitle, StringComparison.OrdinalIgnoreCase))
+            {
+                _aircraftTitle = resolvedTitle;
+                eventTitle = resolvedTitle;
+            }
         }
+        // Events fire outside the lock: subscribers do file IO and must not
+        // stall GetSnapshot callers.
+        if (eventDir != null) OnAircraftDirectoryChanged?.Invoke(eventDir);
+        if (eventTitle != null) OnAircraftTitleChanged?.Invoke(eventTitle);
     }
 
     private static string? ExtractTitleFromConfig(string aircraftDir)
