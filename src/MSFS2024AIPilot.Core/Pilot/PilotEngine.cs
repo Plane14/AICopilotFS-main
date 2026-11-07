@@ -2193,7 +2193,7 @@ public sealed class PilotEngine : IDisposable
             _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
             _planner.Kind = _aircraftKind;
             lock (_lock) _status.AircraftKind = _aircraftKind;
-            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind}");
+            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind} [{_aircraft.AircraftDirectory}]");
 
             if (_aircraftKind == AircraftKind.Rotorcraft)
             {
@@ -2231,9 +2231,9 @@ public sealed class PilotEngine : IDisposable
             var engines = _performance.EngineCount > 0 ? _performance.EngineCount : 1;
             set = GenericChecklists.Create(title, turbine, engines);
         }
-        foreach (var note in set.Notes.Take(3)) Log($"[Checklist] {note}");
+        foreach (var note in set.Notes.Take(5)) Log($"[Checklist] {note}");
         _checklists.Load(set);
-        Log($"[Checklist] Loaded {set.Lists.Count} lists ({set.Format}).");
+        Log($"[Checklist] Loaded {set.Lists.Count} lists ({set.Format}) from '{_aircraft.AircraftDirectory}'.");
     }
 
     private void OnStateUpdated(AircraftState s)
