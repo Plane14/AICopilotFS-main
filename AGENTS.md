@@ -81,15 +81,19 @@ enroute waypoint altitudes are raised to the profile floor; in flight,
 `ApplyTerrainClearance` raises the target when terrain within the next
 ~10–15 NM demands more. When the climb can't reach terrain ahead (valley
 departure) or terrain blocks the descent near a mountain airport, a 2 NM-leg
-racetrack holds the aircraft high (10-minute cap). Offline fallback: highest
+racetrack holds the aircraft high (10-minute cap) only while the path is
+blocked — it releases to nav guidance as soon as the look-ahead window is
+terrain-clear. Offline fallback: highest
 airport elevation + 3000 ft everywhere — logged, never silent.
 
 ### Rotorcraft
 
-No taxi/pushback/runway phases: Startup → Takeoff (vertical climb to 500 ft
-AGL transit for <15 NM legs, else 1000 ft) → low enroute (~90 kt max, 25 kt
-when terrain demands a climb) → ~300 ft approach at ~30 kt → vertical
-set-down at the airport reference → Rollout → turnaround/Shutdown. Routes are
+No runway/pushback phases: hover-taxi at ~30 ft AGL / ~25 kt toward a
+departure point ~1 NM out along the route bearing (or lift off in place
+when already clear), then climb to 500 ft AGL transit for <15 NM legs
+(else 1000 ft) → low enroute (~90 kt max, 25 kt when terrain demands a
+climb) → ~300 ft approach at ~30 kt → vertical set-down at the airport
+reference → Rollout → turnaround/Shutdown. Routes are
 airport-reference to airport-reference (`RouteBuilder.BuildRotorcraftRoute`).
 
 ### Seaplanes / amphibians
