@@ -125,6 +125,14 @@ public sealed class HybridAutopilot
     }
     public void ApproachHold() => _sc.FireEvent("AP_APR_HOLD");
     public void NavHold() => _sc.FireEvent("AP_NAV1_HOLD");
+
+    /// <summary>
+    /// Clears the nav/approach latch memory so the next Update re-sends the
+    /// hold events. Needed after a phase that flew raw heading commands
+    /// (e.g. racetrack) — otherwise the latched flag suppresses re-engaging
+    /// NAV/APR and the aircraft never resumes the flight plan.
+    /// </summary>
+    public void ResetNavLatches() { _lastNav = false; _lastApr = false; }
     public void AutoThrottleArm() => _sc.FireEvent("AUTO_THROTTLE_ARM");
 
     /// <summary>Selects a flap detent by index (0 = up).</summary>

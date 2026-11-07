@@ -42,7 +42,9 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | Back-taxi | `Core/Guidance/BacktrackPlanner.cs` | Geometric runway-remaining vs required-roll decision |
 | Flight plan | `Core/State/FlightPlan.cs`, `Planning/PlnFile.cs` | `FlightPlanWaypoint` model; AceXML `.pln` read/write |
 | Route builder | `Planning/RouteBuilder.cs` | Departure → enroute → final-approach-fix → threshold route generation |
-| Continuous planner | `Planning/ContinuousFlightPlanner.cs` | Random suitable destination inside aircraft range via the facility list |
+| Continuous planner | `Planning/ContinuousFlightPlanner.cs` | Random suitable destination inside aircraft range via the facility list; kind-aware (rotorcraft need no runway, floatplanes need water runways) |
+| Aircraft class | `Aircraft/AircraftKind.cs` | `AircraftKind` (Airplane/Rotorcraft/Seaplane/Amphibian) detection from package cfgs/title/performance + runtime `IS GEAR FLOATS` upgrade |
+| Terrain | `Terrain/TerrainElevations.cs`, `Terrain/TerrainRoute.cs` | Open-Meteo elevation API + disk cache; route terrain profile (1000 ft margin, 2000 ft mountainous, airport+3000 ft fallback), in-flight look-ahead, racetrack helper |
 | Native ATC | `Core/Atc/NativeAtc.cs` | `AtcRequestEngine` (menu probing + SimVar grant detection), `AtcRadio` (COM tuning, squawk, handoffs) |
 | ATC screen capture | `Core/Atc/AtcScreenCapture.cs`, `Core/Atc/AtcMenuScreenReader.cs` | GDI capture of the simulator window + template-matched menu-line recognition; recognised lines are tried before learned/sequential probing |
 | Traffic monitor | `Core/Traffic/TrafficMonitor.cs` | `SimConnect_RequestDataOnSimObjectType` aircraft feed, stale-contact expiry, runway occupancy / on-final / airborne-conflict assessment; gates hold-short entry and triggers go-around |
@@ -68,6 +70,40 @@ Hybrid, matching the previous design:
 line-up) → Takeoff → InitialClimb → Climb → Cruise → Descent → Approach →
 FinalApproach → (GoAround) → Rollout → TaxiIn → Shutdown`, then — in continuous
 mode — a service turnaround and the next leg.
+
+### Terrain avoidance
+
+After each route is built, `AnalyzeTerrainAsync` samples terrain elevation
+(Open-Meteo API, disk-cached in `%LocalAppData%/AICopilotFS/terrain-cache.json`)
+along the route and stores a `TerrainProfile`. Required altitude = terrain +
+1000 ft, or +2000 ft over terrain above ~4500 ft MSL. The cruise altitude and
+enroute waypoint altitudes are raised to the profile floor; in flight,
+`ApplyTerrainClearance` raises the target when terrain within the next
+~10–15 NM demands more. When the climb can't reach terrain ahead (valley
+departure) or terrain blocks the descent near a mountain airport, a 2 NM-leg
+racetrack holds the aircraft high (10-minute cap) only while the path is
+blocked — it releases to nav guidance as soon as the look-ahead window is
+terrain-clear. Offline fallback: highest
+airport elevation + 3000 ft everywhere — logged, never silent.
+
+### Rotorcraft
+
+No runway/pushback phases: hover-taxi at ~30 ft AGL / ~25 kt toward a
+departure point ~1 NM out along the route bearing (or lift off in place
+when already clear), then climb to 500 ft AGL transit for <15 NM legs
+(else 1000 ft) → low enroute (~90 kt max, 25 kt when terrain demands a
+climb) → ~300 ft approach at ~30 kt → vertical set-down at the airport
+reference → Rollout → turnaround/Shutdown. Routes are
+airport-reference to airport-reference (`RouteBuilder.BuildRotorcraftRoute`).
+
+### Seaplanes / amphibians
+
+Water runways are identified by the official facility `SURFACE` enum
+(2, 26–31) or the `WATER` designator. Floatplanes only receive water runways;
+amphibians prefer them but may use land runways. Water departures skip
+pushback/taxi (no ground graph) and line up on the water; amphibians command
+gear up for water ops and down for land ops (`ArrivalNeedsGear`). Gear is
+never extended on a water arrival.
 
 ## Continuous flights
 
