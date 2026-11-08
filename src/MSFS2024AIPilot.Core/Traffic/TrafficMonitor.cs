@@ -263,7 +263,7 @@ public sealed class TrafficMonitor : IDisposable
     public TrafficAssessment Assess(AircraftState own, RunwayInfo? runway = null)
     {
         var live = _contacts.RemoveStale(_options.ContactTimeout);
-        LastAssessment = TrafficEvaluator.Evaluate(live, own, runway, _options);
+        LastAssessment = TrafficEvaluator.Evaluate(live, own, runway, _options, _log);
         return LastAssessment;
     }
 
@@ -343,7 +343,7 @@ internal sealed class ContactTracker
 internal static class TrafficEvaluator
 {
     public static TrafficAssessment Evaluate(
-        List<TrafficContact> live, AircraftState own, RunwayInfo? runway, TrafficOptions options)
+        List<TrafficContact> live, AircraftState own, RunwayInfo? runway, TrafficOptions options, Action<string>? log = null)
     {
         var airborne = new List<TrafficContact>();
         var occupant = default(TrafficContact);
@@ -393,6 +393,12 @@ internal static class TrafficEvaluator
             }
         }
 
+        var conflicts = airborne.Count > 0 ? airborne.Select(c => $"{c.ObjectId}@{c.RangeNauticalMiles:F1}NM") : Enumerable.Empty<string>();
+        var occ = occupant is { } o ? $"occupant={o.ObjectId}@{o.RangeNauticalMiles:F1}NM" : "none";
+        var arr = arrival is { } ar ? $"arrival={ar.ObjectId}@{ar.RangeNauticalMiles:F1}NM" : "none";
+        if (conflicts.Any() || occupant != null || arrival != null)
+            log?.Invoke($"[Traffic] assessment: conflicts=[{string.Join(",", conflicts)}] {occ} {arr}");
+
         return new TrafficAssessment
         {
             Contacts = live,
@@ -401,11 +407,6 @@ internal static class TrafficEvaluator
             ArrivalOnDepartureRunway = arrival
         };
     }
-
-    /// <summary>
-    /// An aircraft is on final when it is airborne, low, close to the runway threshold it
-    /// is approaching, and pointing down that runway rather than across it.
-    /// </summary>
     private static bool IsOnFinal(TrafficContact contact, RunwayInfo runway, TrafficOptions options)
     {
         var threshold = runway.PrimaryEnd;

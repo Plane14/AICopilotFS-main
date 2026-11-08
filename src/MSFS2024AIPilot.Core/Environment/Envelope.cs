@@ -21,6 +21,8 @@ public sealed class OperatingLimits
 {
     /// <summary>Never-exceed speed from the aircraft's barber pole, knots. 0 = unknown.</summary>
     public double MaxAirspeedKt { get; set; }
+    /// <summary>Maximum operating Mach (MMO), 0 = unknown.</summary>
+    public double MaxMach { get; set; }
     /// <summary>Load factor ceiling for the current configuration.</summary>
     public double MaxLoadFactorG { get; set; } = FlightEnvelope.MaxLoadFactorCleanG;
     public double MinLoadFactorG { get; set; } = FlightEnvelope.MinLoadFactorGMagnitude;
@@ -40,6 +42,7 @@ public sealed class OperatingLimits
     public bool HasGearSpeedLimit => MaxGearSpeedKt > 0;
     public bool HasSpeedFloor => MinAirspeedKt > 0;
     public bool HasEgtLimit => MaxEgtC > 0;
+    public bool HasMachLimit => MaxMach > 0;
 
     /// <summary>The lowest speed limit that applies in the current configuration.</summary>
     public double ConfigurationSpeedLimitKt(int flapHandleIndex, bool gearDown)
@@ -50,6 +53,9 @@ public sealed class OperatingLimits
         // the numbers and this picks the applicable one.
         if (flapHandleIndex > 0 && HasFlapSpeedLimit) limit = Math.Min(limit, MaxFlapSpeedKt);
         if (gearDown && HasGearSpeedLimit) limit = Math.Min(limit, MaxGearSpeedKt);
+        // Mach limit converted to knots at sea level ISA (conservative: speed of sound
+        // only decreases with altitude, so this is an upper bound on the Mach-derived kt).
+        if (HasMachLimit) limit = Math.Min(limit, MaxMach * 661.7);
         return limit == double.MaxValue ? 0 : limit;
     }
 }
@@ -133,6 +139,9 @@ public sealed class EnvelopeGuard
 
     public bool Overspeed(AircraftState s) =>
         s.OverspeedWarning || OverspeedRisk(s.IndicatedAirspeed, s);
+
+    public bool MachOverspeed(AircraftState s) =>
+        _limits.HasMachLimit && s.Mach > 0 && s.Mach > _limits.MaxMach * 0.98;
 
     public bool EngineOverheat(AircraftState s)
     {

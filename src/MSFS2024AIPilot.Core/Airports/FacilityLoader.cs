@@ -19,6 +19,7 @@ public sealed class AirportFacilityLoader : IDisposable
 
     public event Action<AirportData>? OnAirportLoaded;
     public event Action<string>? OnError;
+    public event Action<string>? OnLog;
     public SimConnectClient SimConnect => _sc;
 
     public AirportFacilityLoader(SimConnectClient sc)
@@ -28,6 +29,8 @@ public sealed class AirportFacilityLoader : IDisposable
         _sc.OnFacilityDataEnd += OnFacilityDataEnd;
         BuildDefinition();
     }
+
+    private void Log(string msg) => OnLog?.Invoke($"[FacilityLoader] {msg}");
 
     private void BuildDefinition()
     {
@@ -61,7 +64,10 @@ public sealed class AirportFacilityLoader : IDisposable
         F("PRIMARY_CLOSED"); F("SECONDARY_CLOSED");
         F("PRIMARY_TAKEOFF"); F("PRIMARY_LANDING");
         F("SECONDARY_TAKEOFF"); F("SECONDARY_LANDING");
-        F("PRIMARY_THRESHOLD"); F("SECONDARY_THRESHOLD");
+        // PRIMARY_THRESHOLD / SECONDARY_THRESHOLD are PAVEMENT structs that the
+        // MSFS 2024 SimConnect facility API rejects when added to a definition
+        // (they return SimConnect exceptions). Threshold positions are derived
+        // from runway geometry (centre ± length/2 along heading) instead.
         F("CLOSE RUNWAY");
 
         // TAXI_NAME
@@ -93,6 +99,7 @@ public sealed class AirportFacilityLoader : IDisposable
         var pending = new PendingRequest { Icao = icao };
         pending.Airport.Icao = icao;
         _pending[requestId] = pending;
+        Log($"Requesting facility data for {icao} (requestId={requestId})");
         _sc.RequestFacilityData(_airportDefineId, requestId, icao);
     }
 
@@ -111,12 +118,24 @@ public sealed class AirportFacilityLoader : IDisposable
         {
             switch (rec.Type)
             {
-                case FacilityDataType.Airport: ParseAirport(rec, req); break;
-                case FacilityDataType.Runway: ParseRunway(rec, req); break;
-                case FacilityDataType.TaxiName: ParseTaxiName(rec, req); break;
-                case FacilityDataType.TaxiPoint: ParseTaxiPoint(rec, req); break;
-                case FacilityDataType.TaxiParking: ParseTaxiParking(rec, req); break;
-                case FacilityDataType.TaxiPath: ParseTaxiPath(rec, req); break;
+                case FacilityDataType.Airport:
+                    Log($"Airport record received for {req.Airport.Icao}");
+                    ParseAirport(rec, req); break;
+                case FacilityDataType.Runway:
+                    Log($"Runway record received for {req.Airport.Icao} (runway #{req.Airport.Runways.Count + 1})");
+                    ParseRunway(rec, req); break;
+                case FacilityDataType.TaxiName:
+                    Log($"TaxiName record received for {req.Airport.Icao} (name #{req.TaxiNames.Count + 1})");
+                    ParseTaxiName(rec, req); break;
+                case FacilityDataType.TaxiPoint:
+                    Log($"TaxiPoint record received for {req.Airport.Icao} (index={rec.ItemIndex})");
+                    ParseTaxiPoint(rec, req); break;
+                case FacilityDataType.TaxiParking:
+                    Log($"TaxiParking record received for {req.Airport.Icao} (parking #{req.RawTaxiParking.Count + 1})");
+                    ParseTaxiParking(rec, req); break;
+                case FacilityDataType.TaxiPath:
+                    Log($"TaxiPath record received for {req.Airport.Icao} (path #{req.RawTaxiPaths.Count + 1})");
+                    ParseTaxiPath(rec, req); break;
             }
         }
         catch (Exception ex)
@@ -135,6 +154,7 @@ public sealed class AirportFacilityLoader : IDisposable
             var airport = req.Airport;
             airport.IsLoaded = airport.Nodes.Count > 0;
             _pending.Remove(userRequestId);
+            Log($"Airport {airport.Icao} loaded: {airport.Nodes.Count} nodes, {airport.Runways.Count} runways, {airport.TaxiNames.Count} taxi names, path resolution={airport.PathResolutionRatio:P0}");
             OnAirportLoaded?.Invoke(airport);
         }
         catch (Exception ex)
@@ -209,8 +229,9 @@ public sealed class AirportFacilityLoader : IDisposable
             SecondaryTakeoff = r.ReadInt8() != 0,
             SecondaryLanding = r.ReadInt8() != 0,
         };
-        if (r.ReadInt8() != 0) rw.PrimaryThreshold = rw.PrimaryEnd;
-        if (r.ReadInt8() != 0) rw.SecondaryThreshold = rw.SecondaryEnd;
+        // PRIMARY_THRESHOLD / SECONDARY_THRESHOLD are rejected fields and are
+        // not present in the payload. Threshold positions are derived from
+        // runway geometry (PrimaryEnd / SecondaryEnd) in RunwayInfo.
         req.Airport.Runways.Add(rw);
     }
 

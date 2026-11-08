@@ -66,6 +66,40 @@ public sealed class AircraftState
     public bool OverspeedWarning { get; set; }
     public double BarberPoleKt { get; set; }
 
+    /// <summary>Mach maximum operate (MMO) from the aircraft's own indications, 0 = unknown.</summary>
+    public double MachMaxOperate { get; set; }
+
+    /// <summary>Barber pole in Mach units, 0 = unknown.</summary>
+    public double BarberPoleMach { get; set; }
+
+    /// <summary>Effective never-exceed speed: the lower of barber-pole knots and MMO-converted knots.</summary>
+    public double MaxAirspeedLimitKt
+    {
+        get
+        {
+            var limits = new List<double>();
+            if (BarberPoleKt > 0) limits.Add(BarberPoleKt);
+            if (MachMaxOperate > 0)
+            {
+                // Convert MMO to knots using standard atmosphere at sea level:
+                // Mach 1 ≈ 661.7 knots at sea level, ISA.
+                limits.Add(MachMaxOperate * 661.7);
+            }
+            return limits.Count > 0 ? limits.Min() : 0;
+        }
+    }
+
+    /// <summary>Effective barber-pole limit in Mach units.</summary>
+    public double MaxMachLimit
+    {
+        get
+        {
+            if (BarberPoleMach > 0) return BarberPoleMach;
+            if (BarberPoleKt > 0) return BarberPoleKt / 661.7;
+            return 0;
+        }
+    }
+
     // --- Engines & fuel ---
     public int EngineCount { get; set; }
     public bool EnginesRunning { get; set; }

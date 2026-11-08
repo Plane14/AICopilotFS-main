@@ -138,6 +138,13 @@ public sealed class PilotEngine : IDisposable
         _aircraft.OnAircraftDirectoryChanged += OnAircraftDirectoryChanged;
         _aircraft.OnError += msg => Log($"[SimConnect] {msg}");
         _checklists.OnChecklistChanged += _ => PublishStatus();
+
+        // Forward child-component logs to the pilot log.
+        _aircraft.OnLog += msg => Log(msg);
+        _facilities.OnLog += msg => Log(msg);
+        _planner.OnLog += msg => Log(msg);
+        _ap.OnLog += msg => Log(msg);
+        _checklists.OnLog += msg => Log(msg);
     }
 
     public PilotStatus Status { get { lock (_lock) return _status; } }
@@ -350,7 +357,8 @@ public sealed class PilotEngine : IDisposable
         }
 
         // Feed weather/turbulence into envelope limits.
-        _limits.MaxAirspeedKt = s.BarberPoleKt > 0 ? s.BarberPoleKt : 0;
+        _limits.MaxAirspeedKt = s.MaxAirspeedLimitKt > 0 ? s.MaxAirspeedLimitKt : (s.BarberPoleKt > 0 ? s.BarberPoleKt : 0);
+        _limits.MaxMach = s.MaxMachLimit > 0 ? s.MaxMachLimit : 0;
         _limits.MinAirspeedKt = s.StallWarning ? s.IndicatedAirspeed * 0.9 : VsEstimate(s);
 
         PilotStatus st;
@@ -653,6 +661,7 @@ public sealed class PilotEngine : IDisposable
                 break;
             case FlightPhase.Shutdown:
                 _ap.Neutralize();
+                Log("[Pilot] Shutdown — engines off, controls neutralized.");
                 break;
         }
 
@@ -1066,11 +1075,13 @@ public sealed class PilotEngine : IDisposable
         // Rotate: hold a gentle pitch-up once at Vr.
         if (s.IndicatedAirspeed >= vr && s.AltitudeAGL < 100)
         {
+            Log($"[Pilot] Rotating at IAS={s.IndicatedAirspeed:F1}kt (Vr={vr:F1}kt)");
             t.TargetVsFpm = 1200;
             t.TargetAltitudeFt = null;
         }
         else if (s.AltitudeAGL >= 100)
         {
+            Log($"[Pilot] Liftoff at IAS={s.IndicatedAirspeed:F1}kt AGL={s.AltitudeAGL:F0}ft");
             t.TargetAltitudeFt = _targetCruiseAltitudeFt;
             t.TargetVsFpm = null;
         }
@@ -1093,10 +1104,11 @@ public sealed class PilotEngine : IDisposable
         if (_racetrackActive || ShouldEnterRacetrack(s))
         {
             var wasActive = _racetrackActive;
+            if (!wasActive) Log($"[Pilot] Entering racetrack at alt={s.Altitude:F0}ft IAS={s.IndicatedAirspeed:F1}kt");
             ExecuteRacetrack(s, t);
             // Racetrack flew raw heading holds — re-arm the nav latch so the
             // flight plan is re-engaged on the next enroute frame.
-            if (wasActive && !_racetrackActive) _ap.ResetNavLatches();
+            if (wasActive && !_racetrackActive) { _ap.ResetNavLatches(); Log($"[Pilot] Exiting racetrack, resuming nav"); }
             return;
         }
 
@@ -1503,6 +1515,7 @@ public sealed class PilotEngine : IDisposable
         t.TargetVsFpm = vs;
         t.TargetAltitudeFt = _route?.FinalApproachFix?.Altitude ?? _targetCruiseAltitudeFt * 0.3;
         ApplyTerrainClearance(s, t, aheadNm: 10);
+        Log($"[Pilot] Descent started: IAS={t.TargetAirspeedKt:F1}kt VS={vs:F0}fpm targetAlt={t.TargetAltitudeFt:F0}ft");
         if (s.GearDown == false && s.AltitudeAGL < 3000 && ArrivalNeedsGear()) t.GearDown = true;
     }
 
@@ -1522,8 +1535,8 @@ public sealed class PilotEngine : IDisposable
         var fafAlt = _route?.FinalApproachFix?.Altitude ?? s.Altitude;
         t.TargetAltitudeFt = fafAlt;
         t.TargetVsFpm = -Math.Min(1200, Math.Abs(fafAlt - (_destinationAirport?.ReferenceAltitudeMeters ?? 0) * GeoMath.FeetPerMeter) / 5);
-        if (!s.GearDown && ArrivalNeedsGear()) t.GearDown = true;
-        if (s.FlapsHandleIndex < 1) t.FlapIndex = 1;
+        if (!s.GearDown && ArrivalNeedsGear()) { t.GearDown = true; Log($"[Pilot] Gear down for approach at {s.Altitude:F0}ft"); }
+        if (s.FlapsHandleIndex < 1) { t.FlapIndex = 1; Log($"[Pilot] Flaps 1 for approach"); }
     }
 
     /// <summary>
@@ -1634,6 +1647,7 @@ public sealed class PilotEngine : IDisposable
 
     private void ExecuteGoAround(AircraftState s, ControlTargets t)
     {
+        Log($"[Pilot] Go-around: IAS={s.IndicatedAirspeed:F1}kt alt={s.Altitude:F0}ft AGL={s.AltitudeAGL:F0}ft");
         if (_aircraftKind == AircraftKind.Rotorcraft)
         {
             // Climb back to transit altitude, then re-approach.
@@ -1647,6 +1661,7 @@ public sealed class PilotEngine : IDisposable
             if (next is not null)
                 t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, next.Latitude, next.Longitude);
             t.GearDown = false;
+            Log($"[Pilot] Rotorcraft go-around: climbing to {t.TargetAltitudeFt:F0}ft");
             return;
         }
         _ap.SetDirectMode(false);
@@ -1661,8 +1676,8 @@ public sealed class PilotEngine : IDisposable
         }
         t.TargetAltitudeFt = _targetCruiseAltitudeFt;
         t.TargetAirspeedKt = _performance.ClimbSpeed > 0 ? _performance.ClimbSpeed : 90;
-        if (ArrivalNeedsGear() && !s.GearDown) t.GearDown = true;
-        if (s.FlapsHandleIndex > 0) t.FlapIndex = 0;
+        if (ArrivalNeedsGear() && !s.GearDown) { t.GearDown = true; Log("[Pilot] Gear down during go-around"); }
+        if (s.FlapsHandleIndex > 0) { t.FlapIndex = 0; Log("[Pilot] Flaps up during go-around"); }
     }
 
     // ----- Rollout / taxi-in -----
@@ -1674,10 +1689,12 @@ public sealed class PilotEngine : IDisposable
         t.TargetHeadingDeg = s.TrueHeading;
         if (s.GroundSpeed < 60)
         {
+            Log($"[Pilot] Rollout slowing: GS={s.GroundSpeed:F1}kt");
             _ap.ParkingBrake(s.GroundSpeed < 20);
-            if (s.GroundSpeed < 5 && s.FlapsHandleIndex > 0) t.FlapIndex = 0;
+            if (s.GroundSpeed < 5 && s.FlapsHandleIndex > 0) { t.FlapIndex = 0; Log("[Pilot] Flaps retracted after landing"); }
         }
         if (!s.GearDown && s.AltitudeAGL < 20) { /* stay down until stopped */ }
+        if (s.GroundSpeed < 5 && _ap.DirectMode) Log("[Pilot] Rollout complete — stopped on runway");
     }
 
     private void ExecuteTaxiIn(AircraftState s, ControlTargets t)
@@ -1711,7 +1728,11 @@ public sealed class PilotEngine : IDisposable
         var dist = GeoMath.DistanceMeters(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
         t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
         t.ThrottleFraction = dist > 60 ? 0.15 : dist > 25 ? 0.08 : 0.03;
-        if (dist < 10) _taxiLegIndex++;
+        if (dist < 10)
+        {
+            Log($"[Pilot] Taxi leg {_taxiLegIndex + 1}/{legs.Count} reached node {leg.ToNode}");
+            _taxiLegIndex++;
+        }
     }
     private bool _taxiInPlanned;
 
