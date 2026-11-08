@@ -1,99 +1,55 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using MSFS2024AIPilot.Core.Paths;
 
 namespace MSFS2024AIPilot.Core.Aircraft;
 
 /// <summary>
-/// Finds the installed aircraft package directory so performance and checklist
-/// data can be read from it. Matches on the title inside aircraft.cfg, since the
-/// package folder name is a slug that rarely equals the sim's published title.
+/// Resolves an aircraft package directory WITHOUT scanning the install: the
+/// only accepted input is a direct path hint (the AircraftLoaded system state
+/// hands us the exact aircraft.cfg location). Package/VFS scanning was removed
+/// — it took ~100 s over the VFS projection and stalled engine start; aircraft
+/// performance and checklist data come from the bundled flightchecklist.app
+/// library keyed by the TITLE SimVar instead.
 /// </summary>
 public static class AircraftPackageLocator
 {
-    public static string? LocateAircraftDirectory(string title, string? rootOverride = null, SimulatorPathsConfig? config = null)
+    /// <summary>
+    /// Resolves <paramref name="rootOverride"/> (a directory or a file inside
+    /// it, e.g. the aircraft.cfg path from AircraftLoaded) to the package
+    /// directory. Returns null when the hint does not point at an aircraft
+    /// package. Never scans: a path that does not already look like a package
+    /// is rejected rather than searched for.
+    /// </summary>
+    public static string? LocateAircraftDirectory(string title, string? rootOverride = null)
     {
-        if (!string.IsNullOrWhiteSpace(rootOverride))
-        {
-            var dir = ResolveOverrideDirectory(rootOverride);
-            if (!string.IsNullOrEmpty(dir)) return dir;
-            if (!string.IsNullOrWhiteSpace(title) && Directory.Exists(rootOverride))
-                return LocateWithin(title, rootOverride);
-            return null;
-        }
-        if (string.IsNullOrWhiteSpace(title)) return null;
-        return LocateAcrossRoots(title, config);
+        if (string.IsNullOrWhiteSpace(rootOverride)) return null;
+        var dir = ResolveOverrideDirectory(rootOverride);
+        if (string.IsNullOrEmpty(dir)) return null;
+        if (File.Exists(Path.Combine(dir, "aircraft.cfg")) ||
+            File.Exists(Path.Combine(dir, "flight_model.cfg")))
+            return dir;
+        return null;
     }
 
     private static string? ResolveOverrideDirectory(string? rootOverride)
     {
-        if (string.IsNullOrWhiteSpace(rootOverride) || !File.Exists(rootOverride)) return null;
-        // The override may be the .air file itself or a directory.
-        var dir = Directory.Exists(rootOverride) ? rootOverride : Path.GetDirectoryName(rootOverride);
-        return string.IsNullOrEmpty(dir) ? null : dir;
+        if (string.IsNullOrWhiteSpace(rootOverride)) return null;
+        // The override may be the .cfg file itself or a directory containing it.
+        if (File.Exists(rootOverride))
+            return Path.GetDirectoryName(rootOverride);
+        return Directory.Exists(rootOverride) ? rootOverride : null;
     }
 
-    private static string? LocateWithin(string title, string root)
+    /// <summary>
+    /// MSFS ships unresolved localization tokens in cfg titles and the sim's
+    /// TITLE variable ("$$:Cessna $$:172"). Strip the token markers so the GUI
+    /// and log show "Cessna 172".
+    /// </summary>
+    public static string CleanTitle(string? title)
     {
-        foreach (var cfg in EnumerateAircraftConfigs(root))
-        {
-            var dir = Path.GetDirectoryName(cfg);
-            if (dir is not null && MatchesTitle(cfg, title)) return dir;
-        }
-        return null;
+        if (string.IsNullOrWhiteSpace(title)) return "";
+        var t = System.Text.RegularExpressions.Regex.Replace(title, @"\$\$:\s*", "");
+        t = t.Replace("$$", "").Trim();
+        return System.Text.RegularExpressions.Regex.Replace(t, @"\s{2,}", " ");
     }
-
-    private static string? LocateAcrossRoots(string title, SimulatorPathsConfig? config)
-    {
-        var layout = config is null ? MsfsInstallLayout.Discover() : MsfsInstallLayout.Discover(config);
-        foreach (var root in layout.AircraftSearchRoots)
-        {
-            var found = LocateWithin(title, root);
-            if (found is not null) return found;
-        }
-        return null;
-    }
-
-    private static IEnumerable<string> EnumerateAircraftConfigs(string root)
-    {
-        IEnumerable<string> files;
-        try { files = Directory.EnumerateFiles(root, "aircraft.cfg", SearchOption.AllDirectories); }
-        catch { yield break; }
-        foreach (var f in files)
-        {
-            // Skip deep unrelated trees (sound, textures) — aircraft.cfg lives at the package root.
-            if (f.Contains("sound", StringComparison.OrdinalIgnoreCase) ||
-                f.Contains("texture", StringComparison.OrdinalIgnoreCase) ||
-                f.Contains("panel", StringComparison.OrdinalIgnoreCase)) continue;
-            yield return f;
-        }
-    }
-
-    internal static bool MatchesTitle(string cfgPath, string title)
-    {
-        try
-        {
-            var normalizedTitle = Normalize(title);
-            foreach (var line in File.ReadLines(cfgPath))
-            {
-                var t = line.Trim();
-                var eq = t.IndexOf('=');
-                if (eq < 0 || !t[..eq].Trim().Equals("title", StringComparison.OrdinalIgnoreCase)) continue;
-                var value = t[(eq + 1)..].Trim().Trim('"');
-                return Normalize(value).Contains(normalizedTitle) || normalizedTitle.Contains(Normalize(value));
-            }
-        }
-        catch { }
-        return false;
-    }
-
-    internal static string Normalize(string s)
-        => new string(s.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
-
-    /// <summary>True when the directory looks like an aircraft package root.</summary>
-    public static bool HasProfileContent(string dir)
-        => File.Exists(Path.Combine(dir, "aircraft.cfg")) ||
-           File.Exists(Path.Combine(dir, "flight_model.cfg"));
 }

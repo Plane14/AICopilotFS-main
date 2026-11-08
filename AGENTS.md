@@ -25,10 +25,10 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | Component | File | Purpose |
 |---|---|---|
 | SimConnect client | `Core/SimConnect/SimConnect.cs` | Native P/Invoke wrapper over `SimConnect.dll`: data definitions, events, SimObject/string/facility data, airport lists, flight-plan load |
-| Aircraft link | `Core/Aircraft/SimAircraft.cs` | Owns the connection; registers one data definition per block (POSITION, ATTITUDE, SPEEDS, ENGINES, ENGINE_LIMITS, FUEL, AUTOPILOT, ENVIRONMENT, NAVIGATION, NAVRADIO, SYSTEMS, APMODES, COM, ATC, WEATHER, PUSHBACK, ATC text, aircraft title) and decodes them into `AircraftState` |
+| Aircraft link | `Core/Aircraft/SimAircraft.cs` | Owns the connection; registers one data definition per block (POSITION, ATTITUDE, SPEEDS, ENGINES, ENGINE_LIMITS, FUEL, AUTOPILOT, ENVIRONMENT, NAVIGATION, NAVRADIO, SYSTEMS, APMODES, COM, ATC, WEATHER, PUSHBACK, ATC text, aircraft title) and decodes them into `AircraftState`. Runs a dedicated pump thread that blocks on the SimConnect message event (`hEventHandle` passed to `SimConnect_Open`) and drains `SimConnect_CallDispatch` — `CallDispatch` blocks when the sim has no messages, so it is only ever called while the event is signaled |
 | MSFS paths | `Core/Paths/SimPaths.cs` | `UserCfg.opt` parsing, Store package roots, community/official package folders, VFS projection |
 | Aircraft package | `Core/Aircraft/AircraftPackageLocator.cs` | Locates the loaded aircraft's package directory from its title |
-| Performance | `Core/Aircraft/Performance.cs` | `AircraftPerformance` + `AircraftConfigParser` for `aircraft.cfg` / `flight_model.cfg` / `engines.cfg` / `flight_performance.cfg` |
+| Performance | `Core/Aircraft/Performance.cs` | `AircraftPerformance` model, `PerformanceCalculator` (n-D table interpolation, V-speeds), `AircraftConfigParser` for `aircraft.cfg` / `flight_model.cfg` / `engines.cfg` / `flight_performance.cfg` (incl. `::`-separated multidimensional tables) |
 | Airport data | `Core/Airports/AirportData.cs` | Runways, ground-graph nodes/edges, parking, bias frames |
 | Facilities API | `Core/Airports/FacilityLoader.cs` | `SimConnect_AddToFacilityDefinition` / `SimConnect_RequestFacilityData`; assembles `AirportData` including runways, taxi points, taxi paths, parking |
 | Airport list | `SimConnect.cs` + `ContinuousFlightPlanner` | `SimConnect_RequestFacilitiesList` for random destination selection |
@@ -48,8 +48,9 @@ debug. The GUI is a normal WPF app referencing the Core library.
 | Native ATC | `Core/Atc/NativeAtc.cs` | `AtcRequestEngine` (menu probing + SimVar grant detection), `AtcRadio` (COM tuning, squawk, handoffs) |
 | ATC screen capture | `Core/Atc/AtcScreenCapture.cs`, `Core/Atc/AtcMenuScreenReader.cs` | GDI capture of the simulator window + template-matched menu-line recognition; recognised lines are tried before learned/sequential probing |
 | Traffic monitor | `Core/Traffic/TrafficMonitor.cs` | `SimConnect_RequestDataOnSimObjectType` aircraft feed, stale-contact expiry, runway occupancy / on-final / airborne-conflict assessment; gates hold-short entry and triggers go-around |
-| Checklists | `Core/Checklists/Checklists.cs` | MSFS `SimBase.Document` checklist XML + generic fallbacks + event/simvar bindings |
-| Orchestrator | `Core/Pilot/PilotEngine.cs` | Connection loop, phase state machine, phase executors, turnaround/continuous logic |
+| Checklists | `Core/Checklists/` | MSFS 2024 `SimBase.Document Type="CheckpointLibrary"/"Checklist"` XML parser (steps/pages/blocks/checkpoints, `IncludeCheckpointLibrary`/`IncludeChecklist`, `.loc` localization), legacy text format, condition/expression engine, copilot `Action` execution via `ChecklistSimHost`, text→event/SimVar resolver, procedural `GenericChecklists` fallback |
+| Orchestrator | `Core/Pilot/PilotEngine.cs` | Connection loop, phase state machine, phase executors, turnaround/continuous logic, operational logging |
+| Flight logging | `PilotEngine.Log` | GUI log + daily file `%LocalAppData%/AICopilotFS/pilot-yyyyMMdd.log` (rotated at ~60k lines); diagnostics ~5 s, waypoint captures, phase/traffic/terrain events — recurring telemetry is rate-limited |
 | GUI | `src/MSFS2024AIPilot.Gui` | Connect, mode select (Off / Single / Continuous), service time, engage/pause/disengage, telemetry, checklist, log |
 
 ## Control strategy
@@ -58,7 +59,10 @@ Hybrid, matching the previous design:
 
 - **Ground & precision phases** (taxi, takeoff roll, final approach, rollout): direct
   surface control via PID loops on `AXIS_ELEVATOR_SET`, `AXIS_AILERONS_SET`,
-  `AXIS_RUDDER_SET`, `THROTTLE_SET` (13-bit centred at ~8192).
+  `AXIS_RUDDER_SET`, `THROTTLE_SET` (13-bit centred at ~8192). Axis events are
+  deadbanded (~0.4% full-scale) so steady flight does not spam SimConnect; the
+  cache is re-synced by `Neutralize()`/mode switches so suppressed commands can
+  never leave stale surface state.
 - **Airborne enroute** (climb, cruise, descent): MSFS native autopilot
   (`AP_PANEL_HEADING_HOLD`, `AP_ALT_VAR_SET_ENGLISH`, `AP_SPD_VAR_SET`,
   `AP_NAV1_HOLD`, `AP_APR_HOLD`, `AUTO_THROTTLE_ARM`). Native-mode commands are

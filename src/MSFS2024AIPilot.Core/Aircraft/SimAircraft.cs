@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using MSFS2024AIPilot.Core.Environment;
 using MSFS2024AIPilot.Core.Paths;
@@ -20,7 +21,6 @@ public sealed class SimAircraft : IDisposable
     public const int MaxEngines = 4;
 
     private readonly SimConnectClient _sc;
-    private readonly SimulatorPathsConfig? _paths;
     private AircraftState _state = new();
     private readonly object _stateLock = new();
     private readonly Dictionary<uint, string> _requestMap = new();
@@ -51,7 +51,6 @@ public sealed class SimAircraft : IDisposable
 
     public SimAircraft(SimulatorPathsConfig? paths = null)
     {
-        _paths = paths;
         _sc = new SimConnectClient();
         _sc.OnError += msg => OnError?.Invoke(msg);
         _sc.OnDisconnected += () => OnError?.Invoke("SimConnect connection closed.");
@@ -59,6 +58,9 @@ public sealed class SimAircraft : IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        // A second connect while linked would re-register definitions, re-subscribe
+        // AircraftLoaded (EventIdDuplicate) and stack duplicate data handlers.
+        if (_sc.IsConnected) return;
         Log("Connecting to SimConnect...");
         await _sc.ConnectAsync(cancellationToken: ct);
         Log("SimConnect connected; setting up data definitions.");
@@ -69,15 +71,41 @@ public sealed class SimAircraft : IDisposable
         _reqTitle = _sc.RequestData(_titleDefineId, period: Period.Second);
         _requestMap[_reqTitle] = "TITLE";
         Log($"Data definitions registered: title req={_reqTitle}");
+
+        // Dedicated message pump: sleeps on the SimConnect message event and
+        // drains the queue independently of the control loop, so a slow Tick
+        // can never let inbound data back up (or vice versa).
+        _pumpCts = new CancellationTokenSource();
+        var pumpCt = _pumpCts.Token;
+        _pumpTask = Task.Run(() =>
+        {
+            while (!pumpCt.IsCancellationRequested)
+            {
+                try { Dispatch(50); }
+                catch (Exception ex) { OnError?.Invoke($"[SimConnect] pump error: {ex.Message}"); }
+            }
+        }, pumpCt);
     }
 
-    public void Stop() => _sc.Disconnect();
+    private CancellationTokenSource? _pumpCts;
+    private Task? _pumpTask;
 
     private void Log(string msg) => OnLog?.Invoke($"[SimAircraft] {msg}");
 
-    public void Dispatch()
+    /// <summary>Stops the connection and the message pump.</summary>
+    public void Stop()
     {
-        _sc.Dispatch();
+        try { _pumpCts?.Cancel(); } catch { }
+        _sc.Disconnect();
+    }
+
+    public void Dispatch(int idleWaitMs = 0)
+    {
+        _sc.Dispatch(idleWaitMs);
+        // Only notify when a data handler actually mutated the state — the
+        // pump calls Dispatch ~20x/s even when the sim sent nothing, and each
+        // notification pays a full AircraftState.Clone().
+        if (Interlocked.Exchange(ref _stateDirty, 0) == 0) return;
         long version;
         lock (_stateLock)
         {
@@ -90,6 +118,8 @@ public sealed class SimAircraft : IDisposable
             OnStateUpdated?.Invoke(GetSnapshot());
         }
     }
+
+    private int _stateDirty;
 
     public AircraftState GetSnapshot()
     {
@@ -140,6 +170,7 @@ public sealed class SimAircraft : IDisposable
         for (uint e = 1; e <= MaxEngines; e++)
         {
             layout.Add(("ENGINES", $"GENERAL ENG COMBUSTION:{e}", "bool"));
+            layout.Add(("ENGINES", $"GENERAL ENG STARTER:{e}", "bool"));
             layout.Add(("ENGINES", $"GENERAL ENG RPM:{e}", "rpm"));
             layout.Add(("ENGINES", $"TURB ENG N1:{e}", "percent"));
             layout.Add(("ENGINES", $"TURB ENG N2:{e}", "percent"));
@@ -334,9 +365,10 @@ public sealed class SimAircraft : IDisposable
         _requestMap[_reqAtcText] = "ATCTEXT";
         Log($"ATC text request {_reqAtcText} -> ATCTEXT");
 
-        _sc.OnDataReceived += OnDataReceived;
-        _sc.OnStringDataReceived += OnStringDataReceived;
-        _sc.OnSystemState += OnSystemState;
+        // -= first: a reconnect re-runs this and would otherwise stack handlers.
+        _sc.OnDataReceived -= OnDataReceived; _sc.OnDataReceived += OnDataReceived;
+        _sc.OnStringDataReceived -= OnStringDataReceived; _sc.OnStringDataReceived += OnStringDataReceived;
+        _sc.OnSystemState -= OnSystemState; _sc.OnSystemState += OnSystemState;
     }
 
     private void OnSystemState(SystemStateData data)
@@ -346,11 +378,35 @@ public sealed class SimAircraft : IDisposable
         var airPath = data.String;
         var dir = Path.GetDirectoryName(airPath);
         if (string.IsNullOrEmpty(dir)) return;
-        UpdateAircraftIdentity(dir, _aircraftTitle);
+        Interlocked.Exchange(ref _stateDirty, 1);
+        // Resolution scans package roots and reads cfg files - too slow for
+        // the dispatch pump, so it runs on a worker thread.
+        QueueIdentityWork(() => UpdateAircraftIdentity(dir, _aircraftTitle));
+    }
+
+    private int _identityWorkQueued;
+
+    /// <summary>
+    /// Runs aircraft-identity resolution off the SimConnect pump thread.
+    /// Package scans and cfg reads can take tens of seconds on the VFS
+    /// projection; doing them inside a receive callback froze the whole
+    /// message pump (and GetSnapshot) for the duration.
+    /// </summary>
+    private void QueueIdentityWork(Action work)
+    {
+        if (Interlocked.Exchange(ref _identityWorkQueued, 1) == 1) return;
+        _ = Task.Run(() =>
+        {
+            try { work(); }
+            catch { /* identity resolution must never take the pump down */ }
+            finally { Interlocked.Exchange(ref _identityWorkQueued, 0); }
+        });
     }
 
     private void OnStringDataReceived(StringSimObjectData data)
     {
+        if (data.DefineId != _titleDefineId && data.DefineId != _atcTextDefineId) return;
+        Interlocked.Exchange(ref _stateDirty, 1);
         string S(int i) => i < data.Values.Length ? data.Values[i] : "";
         string? OrNull(int i)
         {
@@ -361,25 +417,35 @@ public sealed class SimAircraft : IDisposable
         if (data.DefineId == _titleDefineId)
         {
             var title = OrNull(0);
+            title = AircraftPackageLocator.CleanTitle(title);
             if (string.IsNullOrWhiteSpace(title)) return;
+            var titleChanged = false;
+            var needsDir = false;
             lock (_stateLock)
             {
                 if (!string.Equals(title, _aircraftTitle, StringComparison.OrdinalIgnoreCase))
                 {
                     _aircraftTitle = title;
-                    Log($"Aircraft title: {_aircraftTitle}");
-                    OnAircraftTitleChanged?.Invoke(_aircraftTitle);
+                    titleChanged = true;
                 }
-                if (string.IsNullOrWhiteSpace(_aircraftDirectory))
-                {
-                    var dir = AircraftPackageLocator.LocateAircraftDirectory(_aircraftTitle, null, _paths);
-                    if (!string.IsNullOrWhiteSpace(dir))
-                    {
-                        _aircraftDirectory = dir;
-                        Log($"Aircraft directory: {_aircraftDirectory}");
-                        OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
-                    }
-                }
+                needsDir = string.IsNullOrWhiteSpace(_aircraftDirectory);
+            }
+            // Subscribers publish status and queue identity loads — never run
+            // them under the state lock or a GetSnapshot caller can deadlock.
+            if (titleChanged) { Log($"Aircraft title: {_aircraftTitle}"); OnAircraftTitleChanged?.Invoke(_aircraftTitle); }
+            // Re-resolve on ANY title change, not just the first: swapping the
+            // aircraft in-sim updates TITLE but leaves _aircraftDirectory
+            // pointing at the previous package, which would keep stale
+            // performance/checklist data forever. UpdateAircraftIdentity only
+            // publishes when the resolved directory actually differs.
+            if (needsDir || titleChanged)
+            {
+                QueueIdentityWork(() => UpdateAircraftIdentity(null, _aircraftTitle));
+                // The AircraftLoaded system state carries the exact package
+                // path — far more reliable than a title scan for encrypted
+                // simobjects whose aircraft.cfg cannot be read for matching.
+                if (titleChanged)
+                    _sc.RequestUserAircraftTitle(RequestAircraftTitle);
             }
         }
         else if (data.DefineId == _atcTextDefineId)
@@ -405,23 +471,41 @@ public sealed class SimAircraft : IDisposable
 
     private void UpdateAircraftIdentity(string? dirHint, string? titleHint)
     {
+        // Runs on a worker thread (QueueIdentityWork): the locate scan and cfg
+        // reads are too slow for the dispatch pump. Resolve first, then publish
+        // under the state lock so GetSnapshot never observes a half update.
+        // Only the AircraftLoaded system-state path hint is used: it names the
+        // exact package directory, so resolution is a single File.Exists check.
+        // There is deliberately NO package scan — walking the VFS projection
+        // took ~100 s and stalled engine start; aircraft data comes from the
+        // bundled flightchecklist.app library keyed by the TITLE SimVar.
         string? resolvedDir = null;
         if (!string.IsNullOrWhiteSpace(dirHint))
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory("", dirHint, _paths);
-        if (resolvedDir == null && !string.IsNullOrWhiteSpace(titleHint))
-            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory(titleHint, null, _paths);
-        if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
-        {
-            _aircraftDirectory = resolvedDir;
-            OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
-        }
+            resolvedDir = AircraftPackageLocator.LocateAircraftDirectory("", dirHint);
 
-        var title = resolvedDir is null ? null : ExtractTitleFromConfig(resolvedDir) ?? titleHint;
-        if (!string.IsNullOrWhiteSpace(title) && !string.Equals(_aircraftTitle, title, StringComparison.OrdinalIgnoreCase))
+        string? resolvedTitle = null;
+        string? eventDir = null;
+        string? eventTitle = null;
+        lock (_stateLock)
         {
-            _aircraftTitle = title;
-            OnAircraftTitleChanged?.Invoke(_aircraftTitle);
+            if (resolvedDir != null && !string.Equals(_aircraftDirectory, resolvedDir, StringComparison.OrdinalIgnoreCase))
+            {
+                _aircraftDirectory = resolvedDir;
+                eventDir = resolvedDir;
+            }
+            resolvedTitle = resolvedDir is null ? null : ExtractTitleFromConfig(resolvedDir) ?? titleHint;
+            if (!string.IsNullOrWhiteSpace(resolvedTitle) &&
+                !string.Equals(_aircraftTitle, resolvedTitle, StringComparison.OrdinalIgnoreCase))
+            {
+                _aircraftTitle = resolvedTitle;
+                eventTitle = resolvedTitle;
+            }
         }
+        if (eventDir != null || eventTitle != null) Interlocked.Exchange(ref _stateDirty, 1);
+        // Events fire outside the lock: subscribers do file IO and must not
+        // stall GetSnapshot callers.
+        if (eventDir != null) { Log($"Aircraft directory: {eventDir}"); OnAircraftDirectoryChanged?.Invoke(eventDir); }
+        if (eventTitle != null) { Log($"Aircraft title: {eventTitle}"); OnAircraftTitleChanged?.Invoke(eventTitle); }
     }
 
     private static string? ExtractTitleFromConfig(string aircraftDir)
@@ -438,7 +522,7 @@ public sealed class SimAircraft : IDisposable
                 if (!t[..eq].Trim().Equals("title", StringComparison.OrdinalIgnoreCase)) continue;
                 var v = t[(eq + 1)..].Trim();
                 if (v.Length >= 2 && v.StartsWith('"') && v.EndsWith('"')) v = v[1..^1];
-                return v;
+                return AircraftPackageLocator.CleanTitle(v);
             }
         }
         catch { }
@@ -450,6 +534,7 @@ public sealed class SimAircraft : IDisposable
     private void OnDataReceived(SimObjectData data)
     {
         if (!_requestMap.TryGetValue(data.RequestId, out var block)) return;
+        Interlocked.Exchange(ref _stateDirty, 1);
         var v = data.Values;
         double D(int i) => i < v.Length && v[i] is double d ? d : 0;
 
@@ -482,18 +567,23 @@ public sealed class SimAircraft : IDisposable
                 case "ENGINES":
                 {
                     _state.EngineCount = Math.Max(1, (int)Math.Round(D(0)));
-                    int count = Math.Min(MaxEngines, Math.Max(1, _state.EngineCount));
+                    // Decode every requested engine slot: NUMBER OF ENGINES can
+                    // under-report on add-on aircraft, and hiding running engines
+                    // would stall startup detection.
+                    int count = MaxEngines;
                     var combustion = new double[count]; var n1 = new double[count];
                     var n2 = new double[count]; var ff = new double[count]; var thr = new double[count];
+                    var starter = new bool[count];
                     for (int e = 0; e < count && e < MaxEngines; e++)
                     {
-                        int b = 1 + e * 6;
-                        combustion[e] = D(b); n1[e] = D(b + 2); n2[e] = D(b + 3);
-                        ff[e] = D(b + 4); thr[e] = D(b + 5);
+                        int b = 1 + e * 7;
+                        combustion[e] = D(b); starter[e] = D(b + 1) > 0.5; n1[e] = D(b + 3);
+                        n2[e] = D(b + 4); ff[e] = D(b + 5); thr[e] = D(b + 6);
                     }
                     _state.EngineN1 = n1; _state.EngineN2 = n2; _state.EngineFF = ff; _state.EngineThrottle = thr;
-                    _state.EnginesRunning = combustion.Any(c => c > 0.5) || n1.Any(n => n > 5);
-                    Log($"ENGINES count={_state.EngineCount} running={_state.EnginesRunning} N1=[{string.Join(",", n1.Select(x => x.ToString("F0")))}] FF=[{string.Join(",", ff.Select(x => x.ToString("F0")))}]");
+                    _state.EngineStarter = starter;
+                    _state.EnginesRunning = combustion.Any(c => c > 0.5) || n1.Any(n => n > 5) || ff.Any(f => f > 1);
+                    if (ShouldLog(block)) Log($"ENGINES count={_state.EngineCount} running={_state.EnginesRunning} N1=[{string.Join(",", n1.Select(x => x.ToString("F0")))}] FF=[{string.Join(",", ff.Select(x => x.ToString("F0")))}]");
                     break;
                 }
                 case "ENGINE_LIMITS":
@@ -645,11 +735,17 @@ public sealed class SimAircraft : IDisposable
 
     private static string FormatFrequency(double mhz)
     {
-        var asInt = (uint)(mhz * 1000);
+        var asInt = (uint)Math.Round(mhz * 1000);
         return $"{asInt / 1000}.{asInt % 1000:D3}";
     }
 
-    public void Dispose() => _sc.Dispose();
+    public void Dispose()
+    {
+        Stop();
+        try { _pumpTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        _pumpCts?.Dispose();
+        _sc.Dispose();
+    }
 }
 
 internal static class NavigationStateExtensions

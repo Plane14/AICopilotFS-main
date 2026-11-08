@@ -18,6 +18,9 @@ public sealed class AirportFacilityLoader : IDisposable
     private readonly Dictionary<uint, PendingRequest> _pending = new();
 
     public event Action<AirportData>? OnAirportLoaded;
+
+    /// <summary>Fires with the facility request id so callers can match the exact request.</summary>
+    public event Action<uint, AirportData>? OnAirportLoadedForRequest;
     public event Action<string>? OnError;
     public event Action<string>? OnLog;
     public SimConnectClient SimConnect => _sc;
@@ -27,7 +30,21 @@ public sealed class AirportFacilityLoader : IDisposable
         _sc = sc;
         _sc.OnFacilityData += OnFacilityData;
         _sc.OnFacilityDataEnd += OnFacilityDataEnd;
+        // NOTE: the facility definition is NOT built here — this loader is
+        // constructed before the sim connection exists, and every
+        // AddToFacilityDefinition send would be silently dropped, leaving a
+        // definition the sim rejects with UnrecognizedId. It is built lazily
+        // on the first request, which always happens after connect.
+    }
+
+    private bool _definitionSent;
+
+    private void EnsureDefinition()
+    {
+        if (_definitionSent || _airportDefineId != 0) return;
+        if (!_sc.IsConnected) return; // retry on the next request
         BuildDefinition();
+        _definitionSent = true;
     }
 
     private void Log(string msg) => OnLog?.Invoke($"[FacilityLoader] {msg}");
@@ -92,20 +109,23 @@ public sealed class AirportFacilityLoader : IDisposable
         F("CLOSE AIRPORT");
     }
 
-    /// <summary>Requests the full ground network for an airport (ICAO, e.g. "KLAX").</summary>
-    public void RequestAirport(string icao)
+    /// <summary>Requests the full ground network for an airport (ICAO, e.g. "KLAX"). Returns the request id.</summary>
+    public uint RequestAirport(string icao)
     {
+        EnsureDefinition();
         var requestId = _nextRequestId++;
         var pending = new PendingRequest { Icao = icao };
         pending.Airport.Icao = icao;
         _pending[requestId] = pending;
         Log($"Requesting facility data for {icao} (requestId={requestId})");
         _sc.RequestFacilityData(_airportDefineId, requestId, icao);
+        return requestId;
     }
 
     /// <summary>Requests the bare list of airports known to the sim (ICAO list).</summary>
     public uint RequestAirportList()
     {
+        EnsureDefinition();
         var requestId = _nextRequestId++;
         _sc.RequestFacilitiesList(FacilityListType.Airport, requestId);
         return requestId;
@@ -154,6 +174,7 @@ public sealed class AirportFacilityLoader : IDisposable
             var airport = req.Airport;
             airport.IsLoaded = airport.Nodes.Count > 0;
             _pending.Remove(userRequestId);
+            OnAirportLoadedForRequest?.Invoke(userRequestId, airport);
             Log($"Airport {airport.Icao} loaded: {airport.Nodes.Count} nodes, {airport.Runways.Count} runways, {airport.TaxiNames.Count} taxi names, path resolution={airport.PathResolutionRatio:P0}");
             OnAirportLoaded?.Invoke(airport);
         }
@@ -177,9 +198,12 @@ public sealed class AirportFacilityLoader : IDisposable
         a.ReferenceLongitude = r.ReadFloat64();
         a.ReferenceAltitudeMeters = r.ReadFloat64();
         a.MagneticVariationDeg = r.ReadFloat32();
-        a.Name = r.ReadString(64);
+        a.Name = r.ReadString(32); // NAME is STRING32 per the facilities docs
         r.ReadString(64); // NAME64
-        a.Icao = r.ReadString(8);
+        var payloadIcao = r.ReadString(8);
+        // Some facilities (small strips, seaplane bases) return no ICAO in the
+        // payload — keep the ident we requested so callers can still match it.
+        if (!string.IsNullOrEmpty(payloadIcao)) a.Icao = payloadIcao;
         a.Region = r.ReadString(8);
         r.ReadFloat64(); r.ReadFloat64(); r.ReadFloat64(); // tower pos/alt
         a.TransitionAltitudeMeters = r.ReadFloat32();
@@ -187,17 +211,16 @@ public sealed class AirportFacilityLoader : IDisposable
         a.IsClosed = r.ReadInt8() != 0;
         r.ReadString(256); // COUNTRY
         r.ReadString(256); // CITY_STATE
-        for (int i = 0; i < 16; i++) r.ReadInt32(); // N_* counts
+        for (int i = 0; i < 14; i++) r.ReadInt32(); // N_* counts (14 declared fields)
     }
 
     private static void ParseRunway(FacilityDataRecord rec, PendingRequest req)
     {
         var r = new FacilityPayloadReader(rec.Payload);
-        // Canonical runway payload: ILS region/type pairs first, then geometry.
-        var primaryIlsRegion = r.ReadString(8);
-        var primaryIlsType = (char)r.ReadInt32();
-        var secondaryIlsRegion = r.ReadString(8);
-        var secondaryIlsType = (char)r.ReadInt32();
+        // Canonical runway payload order (MSFS 2024 facilities docs): geometry
+        // first, then surface, then the primary/secondary ILS blocks, then
+        // lights and the per-end flags. PRIMARY/SECONDARY_THRESHOLD are child
+        // STRUCT records we do not declare, so they never appear in the payload.
         var rw = new RunwayInfo
         {
             Latitude = r.ReadFloat64(),
@@ -211,13 +234,13 @@ public sealed class AirportFacilityLoader : IDisposable
             TrueSlopeDegrees = r.ReadFloat32(),
             Surface = r.ReadInt32(),
             PrimaryIlsIcao = r.ReadString(8),
-            PrimaryIlsRegion = primaryIlsRegion,
-            PrimaryIlsType = primaryIlsType,
+            PrimaryIlsRegion = r.ReadString(8),
+            PrimaryIlsType = (char)r.ReadInt32(),
             PrimaryNumber = r.ReadInt32(),
             PrimaryDesignator = r.ReadInt32(),
             SecondaryIlsIcao = r.ReadString(8),
-            SecondaryIlsRegion = secondaryIlsRegion,
-            SecondaryIlsType = secondaryIlsType,
+            SecondaryIlsRegion = r.ReadString(8),
+            SecondaryIlsType = (char)r.ReadInt32(),
             SecondaryNumber = r.ReadInt32(),
             SecondaryDesignator = r.ReadInt32(),
             EdgeLights = r.ReadInt8(),
@@ -439,9 +462,12 @@ public sealed class AirportFacilityLoader : IDisposable
 
             var start = airport.FindNode(p.Start);
             var end = airport.FindNode(p.End);
-            if (end is null && p.Type == (int)TaxiPathType.Parking)
+            if (p.Type == (int)TaxiPathType.Parking)
             {
-                var parking = req.RawTaxiParking.FirstOrDefault(pk => pk.Index == p.End);
+                // For PARKING paths END indexes the parking list, not the taxi
+                // point table. Resolve by list position (0- or 1-based) first,
+                // falling back to a direct taxi-point index match.
+                var parking = ResolveParkingByIndex(req.RawTaxiParking, p.End);
                 if (parking is not null && airport.Nodes.TryGetValue(parking.Index, out var parkingNode))
                     end = parkingNode;
             }
@@ -470,7 +496,18 @@ public sealed class AirportFacilityLoader : IDisposable
         airport.PathResolutionRatio = usable == 0 ? 0 : (double)resolvable / usable;
     }
 
-    private static GroundEdge MakeEdge(RawTaxiPath p, int from, int to, double length) => new()
+    private static RawTaxiParking? ResolveParkingByIndex(List<RawTaxiParking> list, int index)
+    {
+        if (list.Count == 0) return null;
+        // TAXI_PATH END stores the parking node's index — match it directly
+        // before guessing a list position.
+        var byIndex = list.FirstOrDefault(pk => pk.Index == index);
+        if (byIndex is not null) return byIndex;
+        if (index >= 0 && index < list.Count) return list[index];
+        if (index >= 1 && index <= list.Count) return list[index - 1];
+        return null;
+    }
+private static GroundEdge MakeEdge(RawTaxiPath p, int from, int to, double length) => new()
     {
         From = from,
         To = to,

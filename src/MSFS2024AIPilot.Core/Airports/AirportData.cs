@@ -127,6 +127,17 @@ public sealed class RunwayInfo
     }
 
     /// <summary>
+    /// Direction of travel when operating on the named end. The facility HEADING
+    /// is a single runway axis; the two named ends are reciprocal, so a
+    /// secondary-name operation flies heading + 180.
+    /// </summary>
+    public double TravelHeadingDeg(string? runwayName)
+        => !string.IsNullOrWhiteSpace(runwayName) &&
+           SecondaryName.Equals(runwayName.Trim(), StringComparison.OrdinalIgnoreCase)
+            ? GeoMath.NormalizeDeg(HeadingDegTrue + 180)
+            : HeadingDegTrue;
+
+    /// <summary>
     /// The threshold of the end this runway identifies itself by, e.g. "13" or "31L".
     /// A runway only matches on one of its two names.
     /// </summary>
@@ -134,8 +145,8 @@ public sealed class RunwayInfo
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
         var normalized = name.Trim().ToUpperInvariant();
-        if (PrimaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return PrimaryEnd;
-        if (SecondaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return SecondaryEnd;
+        if (PrimaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return PrimaryThreshold ?? PrimaryEnd;
+        if (SecondaryName.Equals(normalized, StringComparison.OrdinalIgnoreCase)) return SecondaryThreshold ?? SecondaryEnd;
         return null;
     }
 

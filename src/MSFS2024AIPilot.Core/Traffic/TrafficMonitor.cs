@@ -409,14 +409,22 @@ internal static class TrafficEvaluator
     }
     private static bool IsOnFinal(TrafficContact contact, RunwayInfo runway, TrafficOptions options)
     {
-        var threshold = runway.PrimaryEnd;
+        // An arrival can be lined up on either end of the strip.
+        return IsOnFinalEnd(contact, runway.PrimaryEnd.lat, runway.PrimaryEnd.lon, runway.AltitudeMeters, options)
+            || IsOnFinalEnd(contact, runway.SecondaryEnd.lat, runway.SecondaryEnd.lon, runway.AltitudeMeters, options);
+    }
+
+    private static bool IsOnFinalEnd(TrafficContact contact, double thresholdLat, double thresholdLon,
+        double runwayAltM, TrafficOptions options)
+    {
+        var threshold = (thresholdLat, thresholdLon);
         var distanceToThreshold = GeoMath.DistanceMeters(
-            contact.Latitude, contact.Longitude, threshold.lat, threshold.lon) / GeoMath.MetersPerNm;
+            contact.Latitude, contact.Longitude, threshold.Item1, threshold.Item2) / GeoMath.MetersPerNm;
         if (distanceToThreshold > options.FinalApproachRangeNauticalMiles) return false;
 
         // Relative to the runway elevation, because a thousand feet is nothing at
         // Denver and a lot at sea level.
-        var heightAboveRunwayFt = contact.AltitudeMslFt - runway.AltitudeMeters * GeoMath.FeetPerMeter;
+        var heightAboveRunwayFt = contact.AltitudeMslFt - runwayAltM * GeoMath.FeetPerMeter;
         if (heightAboveRunwayFt > options.FinalApproachMaxHeightFt) return false;
 
         // 3 degrees needs roughly 318 ft per NM; being higher than that means the
@@ -424,7 +432,7 @@ internal static class TrafficEvaluator
         var expectedHeightFt = distanceToThreshold * 318.0;
         if (heightAboveRunwayFt > expectedHeightFt + 800) return false;
 
-        var bearingToRunway = GeoMath.BearingDeg(contact.Latitude, contact.Longitude, threshold.lat, threshold.lon);
+        var bearingToRunway = GeoMath.BearingDeg(contact.Latitude, contact.Longitude, threshold.Item1, threshold.Item2);
         return Math.Abs(GeoMath.NormalizeDeg(contact.HeadingDegTrue - bearingToRunway)) < 30;
     }
 }

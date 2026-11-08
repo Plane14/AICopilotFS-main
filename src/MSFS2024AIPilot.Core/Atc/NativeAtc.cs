@@ -61,6 +61,7 @@ public sealed class AtcRequestEngine
     private readonly Dictionary<string, HashSet<int>> _triedLines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> _learnedLines = new(StringComparer.OrdinalIgnoreCase);
     private string _circumstance = "";
+    private string _lastRequestKey = "";
     private readonly object _lock = new();
 
     // Per-request probing state.
@@ -103,6 +104,14 @@ public sealed class AtcRequestEngine
     {
         lock (_lock)
         {
+            // Callers re-issue the same request every control tick; an identical
+            // request that is still in flight or already granted must not reset
+            // the probing state, or the menu would be re-opened every frame.
+            var key = $"{kind}|{circumstance}";
+            if (_lastRequestKey == key &&
+                (_status == AtcRequestStatus.Requested || _status == AtcRequestStatus.Accepted))
+                return;
+            _lastRequestKey = key;
             _pending = kind;
             _status = AtcRequestStatus.Requested;
             _requestedUtc = DateTime.UtcNow;
@@ -117,12 +126,24 @@ public sealed class AtcRequestEngine
         }
     }
 
+    /// <summary>Clears the idempotency memory so the same requests can be issued again (new flight leg).</summary>
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _lastRequestKey = "";
+            _pending = AtcRequestKind.None;
+            _status = AtcRequestStatus.Idle;
+        }
+    }
+
     public void Cancel()
     {
         lock (_lock)
         {
             _pending = AtcRequestKind.None;
             _status = AtcRequestStatus.Cancelled;
+            _lastRequestKey = "";
         }
     }
 
@@ -172,12 +193,18 @@ public sealed class AtcRequestEngine
 
     private void ProbeMenu(AircraftState s, AtcRequestKind kind, string circumstance, DateTime now, Action<string>? log)
     {
-        // Open the menu and give it time to draw before the screen is read.
+        // MSFS 2024 has no SimConnect event that opens the ATC menu — the
+        // documented names are localization strings only — so the bound key
+        // (Scroll Lock) is injected into the simulator window instead.
+        // ATC_MENU_n presses only register while the menu is open, and choosing
+        // an entry closes it, so every press is preceded by a fresh open.
         if (!_menuOpenSent)
         {
-            _sc.FireEvent("ATC_MENU_OPEN");
+            var injected = AtcKeyInjector.PressAtcKey();
             _menuOpenSent = true;
             _menuOpenedUtc = now;
+            if (!injected)
+                log?.Invoke("[ATC] could not inject the ATC key into the simulator window");
             return;
         }
         if ((now - _menuOpenedUtc).TotalMilliseconds < MenuRenderMs) return;
@@ -207,8 +234,8 @@ public sealed class AtcRequestEngine
             _lastProbedLine = line;
             _probedAny = true;
             var evt = MenuEventIndex(line);
-            _sc.FireEvent("ATC_MENU_OPEN");
             _sc.FireEvent($"ATC_MENU_{evt}");
+            _menuOpenSent = false; // the selection closes the menu; reopen before the next press
             var source = _recognizedLines is { Count: > 0 } && _recognizedLines.Contains(line) ? " (screen)" : "";
             log?.Invoke($"[ATC] trying line {line} (ATC_MENU_{evt}) for {AtcRequestKinds.Label(kind)}{source}");
             return; // one probe per frame; the grant is detected on a later frame

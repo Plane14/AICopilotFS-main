@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.Airports;
 using MSFS2024AIPilot.Core.Atc;
-using MSFS2024AIPilot.Core.Checklists;
 using MSFS2024AIPilot.Core.Environment;
 using MSFS2024AIPilot.Core.Geo;
 using MSFS2024AIPilot.Core.Guidance;
@@ -71,6 +70,7 @@ public sealed class PilotEngine : IDisposable
     private readonly IGlyphRenderer _glyphRenderer = new GdiGlyphRenderer();
     private readonly Dictionary<AtcRequestKind, AtcMenuReader> _menuReaders = new();
     private readonly ChecklistManager _checklists;
+    private readonly ChecklistSimHost _checklistHost;
     private readonly TurbulenceTracker _turbulence = new();
     private readonly OperatingLimits _limits = new();
     private readonly EnvelopeGuard _envelope;
@@ -124,11 +124,12 @@ public sealed class PilotEngine : IDisposable
     {
         _aircraft = new SimAircraft(paths);
         _facilities = new AirportFacilityLoader(_aircraft.SimConnect);
-        _planner = new ContinuousFlightPlanner(_facilities);
+        _planner = new ContinuousFlightPlanner(_facilities) { Logger = Log };
         _ap = new HybridAutopilot(_aircraft.SimConnect);
         _atcRequests = new AtcRequestEngine(_aircraft.SimConnect);
         _atcRadio = new AtcRadio(_aircraft.SimConnect);
-        _checklists = new ChecklistManager(null);
+        _checklistHost = new ChecklistSimHost(_aircraft.SimConnect);
+        _checklists = new ChecklistManager(_checklistHost, BuildChecklistEnvironment);
         _envelope = new EnvelopeGuard(_limits);
         _traffic = new TrafficMonitor(_aircraft.SimConnect, log: Log);
         _aircraft.SimConnect.OnDataReceived += _traffic.OnData;
@@ -137,14 +138,15 @@ public sealed class PilotEngine : IDisposable
         _aircraft.OnAircraftTitleChanged += OnTitleChanged;
         _aircraft.OnAircraftDirectoryChanged += OnAircraftDirectoryChanged;
         _aircraft.OnError += msg => Log($"[SimConnect] {msg}");
-        _checklists.OnChecklistChanged += _ => PublishStatus();
+        _facilities.OnError += msg => Log($"[Facilities] {msg}");
 
         // Forward child-component logs to the pilot log.
         _aircraft.OnLog += msg => Log(msg);
         _facilities.OnLog += msg => Log(msg);
         _planner.OnLog += msg => Log(msg);
         _ap.OnLog += msg => Log(msg);
-        _checklists.OnLog += msg => Log(msg);
+        _checklists.OnLog += Log;
+        _checklists.OnItemDone += (_, status) => PublishStatusThrottled();
     }
 
     public PilotStatus Status { get { lock (_lock) return _status; } }
@@ -155,6 +157,7 @@ public sealed class PilotEngine : IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        if (_aircraft.IsConnected) return;
         await _aircraft.ConnectAsync(ct);
         // Kick off the airport list so continuous mode can pick destinations.
         try { _planner.RequestAirportList(); } catch { }
@@ -170,7 +173,14 @@ public sealed class PilotEngine : IDisposable
     {
         var (wps, nav) = PlnFile.Parse(plnPath);
         if (wps.Count == 0) { Log("[Pilot] Flight plan file has no waypoints."); return false; }
+        // Shares the route-planning gate with continuous/manual planning.
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try { return await LoadFlightPlanCoreAsync(plnPath, wps, nav, ct); }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
+    }
 
+    private async Task<bool> LoadFlightPlanCoreAsync(string plnPath, List<FlightPlanWaypoint> wps, NavigationState nav, CancellationToken ct)
+    {
         var s = _aircraft.GetSnapshot();
         _routeNav = nav;
         _routeNav.Waypoints = wps;
@@ -225,14 +235,26 @@ public sealed class PilotEngine : IDisposable
         return true;
     }
 
-    /// <summary>Nearest airport to the aircraft, using the facility list coordinates.</summary>
+    /// <summary>
+    /// Airport the aircraft is at/near, using the facility list coordinates.
+    /// Tries the nearest candidates in turn — a strip missing from the facility
+    /// database or a failed load must not abort departure planning.
+    /// </summary>
     private async Task<AirportData?> FindNearestAirportAsync(AircraftState s, CancellationToken ct)
     {
         if (!await _planner.WaitForAirportListAsync(TimeSpan.FromSeconds(30), ct)) return null;
-        var near = _planner.NearestAirport(s.Latitude, s.Longitude);
-        if (near is null) return null;
-        Log($"[Pilot] Nearest airport: {near.Value.icao} ({near.Value.distNm:F1} nm)");
-        return await _planner.LoadAirportAsync(near.Value.icao, TimeSpan.FromSeconds(20), ct);
+        var candidates = _planner.NearestAirports(s.Latitude, s.Longitude, 8);
+        if (candidates.Count == 0) return null;
+        Log($"[Pilot] Position {s.Latitude:F4},{s.Longitude:F4}; nearest listed airports: " +
+            string.Join(", ", candidates.Take(3).Select(c => $"{c.icao} {c.distNm:F1}nm")));
+        foreach (var c in candidates)
+        {
+            var data = await _planner.LoadAirportAsync(c.icao, TimeSpan.FromSeconds(15), ct);
+            if (data is null) { Log($"[Pilot] Facility data unavailable for {c.icao} ({c.distNm:F1} nm) — trying next."); continue; }
+            Log($"[Pilot] Nearest airport: {data.Icao} ({c.distNm:F1} nm)");
+            return data;
+        }
+        return null;
     }
 
     /// <summary>Starts (or resumes) the control loop.</summary>
@@ -264,7 +286,7 @@ public sealed class PilotEngine : IDisposable
             _departureAirport = await FindNearestAirportAsync(s, CancellationToken.None);
             if (_departureAirport is null) { Log("[Pilot] Could not identify the departure airport."); return; }
             Log($"[Pilot] Continuous flights departing from {_departureAirport.Icao}.");
-            await PlanNextLegAsync(CancellationToken.None);
+            await TryPlanNextLegAsync(CancellationToken.None);
             if (_route is not null) SetPhase(FlightPhase.Preflight);
         }
         catch (Exception ex) { Log($"[Pilot] Continuous departure planning failed: {ex.Message}"); }
@@ -300,15 +322,36 @@ public sealed class PilotEngine : IDisposable
     public async Task<bool> FlyNextLegAsync(CancellationToken ct = default)
     {
         if (!ContinuousEnabled) return false;
-        return await PlanNextLegAsync(ct);
+        return await TryPlanNextLegAsync(ct);
     }
 
     private void StartLoop()
     {
         _loopCts?.Cancel();
         _loopCts = new CancellationTokenSource();
+        _lastLoopHeartbeatUtc = DateTime.UtcNow;
         _loopTask = Task.Run(() => LoopAsync(_loopCts.Token));
+        var ct = _loopCts.Token;
+        // Watchdog on its own task: if Dispatch/Tick stalls (e.g. a blocked
+        // SimConnect call) the loop itself can never report it.
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(15000, ct); } catch { return; }
+                var silent = DateTime.UtcNow - _lastLoopHeartbeatUtc;
+                if (silent > TimeSpan.FromSeconds(20) && !_watchdogWarned)
+                {
+                    _watchdogWarned = true;
+                    Log($"[Pilot] WARNING: control loop silent for {silent.TotalSeconds:F0}s — stalled in Tick stage '{_tickStage}'.");
+                }
+                else if (silent <= TimeSpan.FromSeconds(20)) _watchdogWarned = false;
+            }
+        }, ct);
     }
+
+    private DateTime _lastLoopHeartbeatUtc = DateTime.MinValue;
+    private bool _watchdogWarned;
 
     private async Task LoopAsync(CancellationToken ct)
     {
@@ -317,15 +360,26 @@ public sealed class PilotEngine : IDisposable
         {
             try
             {
-                _aircraft.Dispatch();
+                // SimConnect messages are pumped on SimAircraft's dedicated
+                // thread — this loop only reads the latest snapshot.
                 var now = DateTime.UtcNow;
+                _lastLoopHeartbeatUtc = now;
+                _tickStage = "tick";
                 var dt = Math.Clamp((now - last).TotalSeconds, 0.01, 0.5);
                 last = now;
                 Tick(dt, now);
             }
             catch (Exception ex)
             {
-                Log($"[Pilot] loop error: {ex.Message}");
+                // A persistent fault would otherwise write ~20 lines/second to
+                // the log and GUI forever. Log the first occurrence and then
+                // at most once every 10 s, always with the exception type.
+                var errNow = DateTime.UtcNow;
+                if (errNow - _lastLoopErrorLogUtc > TimeSpan.FromSeconds(10))
+                {
+                    _lastLoopErrorLogUtc = errNow;
+                    Log($"[Pilot] loop error ({ex.GetType().Name}): {ex.Message}");
+                }
             }
             await Task.Delay(50, ct).ConfigureAwait(false);
         }
@@ -333,16 +387,22 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Per-frame logic ----------------
 
+    private volatile string _tickStage = "start";
+
     private void Tick(double dt, DateTime now)
     {
+        _tickStage = "snapshot";
         var s = _aircraft.GetSnapshot();
         _turbulence.Update(s.GLoad, dt, quiet: s.OnGround);
         var turbulence = _turbulence.Level;
 
         // Traffic awareness: refresh the object-type request and assess the
         // runway this phase cares about (departure on the ground, arrival on final).
+        _tickStage = "traffic-refresh";
         _traffic.Refresh();
+        _tickStage = "traffic-assess";
         _trafficAssessment = _traffic.Assess(s, TrafficRunwayFor(s));
+        _tickStage = "traffic-publish";
         PublishTrafficStatus();
 
         // Runtime amphibian detection: the sim reports IS GEAR FLOATS once an
@@ -382,46 +442,74 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
-        // Checklist auto-advance: fire bound events and step through items.
-        AdvanceChecklist(s, now);
+        // Checklists: the ported executor fires copilot actions and verifies
+        // simvars for the aircraft's own checklist steps mapped to this phase.
+        _tickStage = "checklist";
+        _checklists.Tick(st.Phase, dt);
 
         // Phase machine.
+        _tickStage = "phase";
         AdvancePhase(s, now);
         ExecutePhase(s, dt, now, turbulence);
+        _tickStage = "done";
+
+        // Periodic flight diagnostics (~every 5 s while AI is active).
+        if (now - _lastDiagUtc > TimeSpan.FromSeconds(5))
+        {
+            _lastDiagUtc = now;
+            LogDiagnostics(s);
+        }
     }
 
-    private DateTime _lastChecklistAdvanceUtc = DateTime.MinValue;
+    private DateTime _lastDiagUtc = DateTime.MinValue;
+    private DateTime _lastLoopErrorLogUtc = DateTime.MinValue;
+    private ControlTargets _lastTargets = new();
+    private int _lastLoggedWpIndex = -1;
 
-    /// <summary>
-    /// Steps the active checklist: fires the sim event bound to the current item
-    /// (when one is known), waits a beat, then marks it done and advances.
-    /// </summary>
-    private void AdvanceChecklist(AircraftState s, DateTime now)
+    /// <summary>Logs a compact one-line snapshot of flight state and targets.</summary>
+    private void LogDiagnostics(AircraftState s)
     {
-        var c = _checklists.Current;
-        if (c is null || c.Complete) return;
-        if (now - _lastChecklistAdvanceUtc < TimeSpan.FromMilliseconds(1200)) return;
-
-        var item = c.Items[c.CurrentIndex];
-        var evt = ChecklistBindings.EventFor(item.Text);
-        if (evt is not null && item.EventName is null)
+        var t = _lastTargets;
+        var tgt = string.Join(' ', new[]
         {
-            // Fire once, then mark done — the sim event is the action.
-            _aircraft.SimConnect.FireEvent(evt);
-            item.EventName = evt; // remember we fired it
-        }
+            t.TargetHeadingDeg is { } h ? $"HDG {h:F0}" : null,
+            t.TargetAltitudeFt is { } a ? $"ALT {a:F0}" : null,
+            t.TargetAirspeedKt is { } i ? $"IAS {i:F0}" : null,
+            t.TargetVsFpm is { } v ? $"VS {v:F0}" : null,
+            t.ThrottleFraction is { } th ? $"THR {th:P0}" : null,
+            t.GearDown is { } g ? (g ? "GEAR↓" : "GEAR↑") : null,
+            t.FlapIndex is { } f ? $"FLAP {f}" : null,
+        }.Where(x => x is not null));
+        Log($"[Diag] {Status.Phase} | {s.IndicatedAirspeed:F0}kt {s.Altitude:F0}ft {s.VerticalSpeed:+0;-0;0}fpm " +
+            $"hdg {s.TrueHeading:F0} gs {s.GroundSpeed:F0} | {Status.DistanceToGoNm:F0}nm ~{Status.EtaMinutes:F0}min | " +
+            $"{(_ap.DirectMode ? "DIRECT" : "NAV-AP")} | {tgt}");
+    }
 
-        // Items with a known simvar are considered done when the simvar reports it.
-        var sv = ChecklistBindings.SimVarFor(item.Text);
-        if (sv is not null)
+    /// <summary>Logs each flight-plan waypoint capture once.</summary>
+    private void LogNavProgress()
+    {
+        var idx = _nav.ActiveIndex;
+        if (idx == _lastLoggedWpIndex || _routeNav is null) return;
+        _lastLoggedWpIndex = idx;
+        var wp = idx >= 0 && idx < _routeNav.Waypoints.Count ? _routeNav.Waypoints[idx] : null;
+        Log($"[Nav] waypoint {idx + 1}/{_routeNav.Waypoints.Count}: {wp?.Ident ?? "?"}" +
+            (wp?.HasPosition == true ? $" ({wp.Latitude:F3},{wp.Longitude:F3} @{wp.Altitude:F0}ft)" : ""));
+    }
+
+    private ChecklistEnvironment BuildChecklistEnvironment()
+    {
+        var s = _aircraft.IsConnected ? _aircraft.GetSnapshot() : null;
+        return new ChecklistEnvironment
         {
-            // Simple presence check for the common cases.
-            if (sv.Contains("PARKING")) { if (s.ParkingBrakeSet) { _checklists.Advance(); _lastChecklistAdvanceUtc = now; } return; }
-            if (sv.Contains("GEAR")) { if (!s.GearDown || s.AltitudeAGL > 100) { _checklists.Advance(); _lastChecklistAdvanceUtc = now; } return; }
-        }
-
-        _checklists.Advance();
-        _lastChecklistAdvanceUtc = now;
+            Night = false, // no dedicated day/night simvar is subscribed; Overcast covers the "AS REQUIRED" cases
+            Overcast = s?.AmbientInCloud == true || (s?.PrecipitationState ?? 0) > 0,
+            IcingRisk = (s?.StructuralIcePercent ?? 0) > 0 || ((s?.OAT ?? 15) < -10 && s?.AmbientInCloud == true),
+            Turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                      _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase) ||
+                      _aircraftKind == AircraftKind.Rotorcraft,
+            EngineCount = Math.Max(1, s?.EngineCount ?? _performance.EngineCount),
+            TransponderCode = s?.Squawk,
+        };
     }
 
     private void UpdateServiceStatus(AircraftState s, DateTime now)
@@ -466,10 +554,17 @@ public sealed class PilotEngine : IDisposable
                 // Checklists advance through ExecutePhase; engines started -> Startup.
                 break;
 
+            // Airborne engage: the machine must never walk a ground sequence
+            // (taxi route, takeoff roll) while the aircraft is already flying.
             case FlightPhase.Startup:
-                break;
-
             case FlightPhase.TaxiOut:
+                if (!s.OnGround && s.AltitudeAGL > 500)
+                {
+                    Log("[Pilot] Airborne — skipping ground phases, continuing enroute.");
+                    SetPhase(s.Altitude >= (_route?.CruiseAltitudeFt ?? _targetCruiseAltitudeFt) - 200
+                        ? FlightPhase.Cruise : FlightPhase.Climb);
+                    _nav.Reset();
+                }
                 break;
 
             case FlightPhase.Takeoff:
@@ -563,7 +658,7 @@ public sealed class PilotEngine : IDisposable
                         {
                             try
                             {
-                                if (await PlanNextLegAsync(CancellationToken.None) && _route is not null)
+                                if (await TryPlanNextLegAsync(CancellationToken.None) && _route is not null)
                                     SetPhase(FlightPhase.Preflight);
                             }
                             catch (Exception ex) { Log($"[Pilot] Next-leg retry failed: {ex.Message}"); }
@@ -573,9 +668,11 @@ public sealed class PilotEngine : IDisposable
                 break;
         }
 
+        // Do NOT write the local `phase` back here: it was captured before the
+        // switch and would revert every SetPhase() the cases just performed,
+        // leaving the machine stuck re-firing the same transition forever.
         lock (_lock)
         {
-            _status.Phase = phase;
             _status.DistanceToGoNm = RemainingDistanceNm(s);
             _status.EtaMinutes = EtaMinutes(s);
         }
@@ -585,26 +682,14 @@ public sealed class PilotEngine : IDisposable
     private void SetPhase(FlightPhase phase)
     {
         if (phase == FlightPhase.Startup) { _starterAttempts = 0; _starterAttemptUtc = DateTime.MinValue; }
+        // Each new approach gets one traffic go-around — the flag must not
+        // stay latched for the rest of the flight after a missed approach.
+        if (phase == FlightPhase.Approach) _goAroundForTraffic = false;
         lock (_lock) { _status.Phase = phase; _status.StatusText = $"Phase: {phase}"; }
         _phaseEnteredUtc = DateTime.UtcNow;
-        _checklists.SetPhase(MapChecklistPhase(phase));
         Log($"Phase → {phase}");
         PublishStatus();
     }
-
-    private static ChecklistPhase MapChecklistPhase(FlightPhase p) => p switch
-    {
-        FlightPhase.Preflight => ChecklistPhase.Preflight,
-        FlightPhase.Startup => ChecklistPhase.Startup,
-        FlightPhase.TaxiOut => ChecklistPhase.BeforeTakeoff,
-        FlightPhase.Takeoff => ChecklistPhase.BeforeTakeoff,
-        FlightPhase.InitialClimb or FlightPhase.Climb or FlightPhase.Cruise => ChecklistPhase.Cruise,
-        FlightPhase.Descent => ChecklistPhase.Descent,
-        FlightPhase.Approach or FlightPhase.FinalApproach or FlightPhase.GoAround => ChecklistPhase.Approach,
-        FlightPhase.Rollout or FlightPhase.Landing => ChecklistPhase.Landing,
-        FlightPhase.TaxiIn or FlightPhase.Shutdown => ChecklistPhase.Shutdown,
-        _ => ChecklistPhase.Preflight,
-    };
 
     // ---------------- Phase executors ----------------
 
@@ -665,6 +750,7 @@ public sealed class PilotEngine : IDisposable
                 break;
         }
 
+        _lastTargets = targets;
         _ap.SetTargets(targets);
         _ap.Update(s, dt);
     }
@@ -678,37 +764,101 @@ public sealed class PilotEngine : IDisposable
     {
         _ap.SetDirectMode(true);
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
-        // Wait for the user to complete the preflight checklist, then advance.
-        var c = _checklists.Current;
-        if (c is { Complete: true } || c is null)
+        // Wait for the gate checklists (pushback + gate), then advance.
+        var gateDone = _checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE);
+        var pushDone = _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK);
+        if (!_checklists.IsLoaded || (gateDone && pushDone))
             SetPhase(FlightPhase.Startup);
     }
 
     private DateTime _starterAttemptUtc = DateTime.MinValue;
     private int _starterAttempts;
+    private bool _turbineStartersHeld;
+
+    /// <summary>
+    /// Fires a lever SET event in both its unindexed and per-engine forms —
+    /// aircraft bind one or the other, and a SET payload is absolute so firing
+    /// the family cannot flip state. Unknown event names are reported by
+    /// SimConnect and skipped.
+    /// </summary>
+    private void FireLever(string unindexed, string indexed, uint payload)
+    {
+        try { _aircraft.SimConnect.FireEvent(unindexed, payload); } catch { }
+        try { _aircraft.SimConnect.FireEvent(indexed, payload); } catch { }
+    }
+
+    /// <summary>Releases SET_STARTERn_HELD once, after light-off or when giving up.</summary>
+    private void ReleaseHeldStarters(AircraftState s)
+    {
+        if (!_turbineStartersHeld) return;
+        var engines = Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4);
+        for (int e = 1; e <= engines; e++)
+            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 0);
+        _turbineStartersHeld = false;
+        Log("[Pilot] Held starter(s) released.");
+    }
 
     private void ExecuteStartup(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
-        var c = _checklists.Current;
-        if (c is { Complete: true })
+        if (!_checklists.IsLoaded ||
+            (_checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE) &&
+             _checklists.StepComplete(ChecklistStep.PREFLIGHT_PUSHBACK)))
         {
             if (!s.EnginesRunning)
             {
-                // Cold aircraft: try the starter until the engines catch or we give up.
-                if (_starterAttempts < 6 && now - _starterAttemptUtc > TimeSpan.FromSeconds(4))
+                // TOGGLE_STARTER is a toggle: firing it while the starter motor
+                // is already engaged turns it back OFF, so only engines whose
+                // starter is currently off may be toggled. A cold crank needs
+                // several seconds — retry slowly and give up rather than stall
+                // in Startup forever.
+                if (_starterAttempts < 8 && now - _starterAttemptUtc > TimeSpan.FromSeconds(6))
                 {
-                    // Fire the starter for every engine the aircraft reports.
-                    var engines = Math.Clamp(s.EngineCount, 1, 4);
+                    // NUMBER OF ENGINES can under-report on some add-on aircraft;
+                    // the package cfg (icao_engine_count) is the fallback floor.
+                    var engines = Math.Clamp(Math.Max(s.EngineCount, _performance.EngineCount), 1, 4);
+                    // Prefer the simulator's built-in auto-start: it handles magnetos,
+                    // fuel, starter and mixture for every aircraft model, including
+                    // the Asobo C172 where STARTERn_SET alone never cranks.
+                    _aircraft.SimConnect.FireEvent("ENGINE_AUTO_START");
+                    // Also drive the per-engine starter as a fallback for aircraft
+                    // that do not bind ENGINE_AUTO_START.
+                    var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                                  _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase);
                     for (int e = 1; e <= engines; e++)
-                        _aircraft.SimConnect.FireEvent($"TOGGLE_STARTER{e}");
+                    {
+                        if (turbine)
+                        {
+                            _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
+                            _aircraft.SimConnect.FireEvent($"SET_STARTER{e}_HELD", 1);
+                            _turbineStartersHeld = true;
+                        }
+                        else
+                        {
+                            _aircraft.SimConnect.FireEvent($"STARTER{e}_SET", 1);
+                            _aircraft.SimConnect.FireEvent($"MAGNETO{e}_START");
+                            _aircraft.SimConnect.FireEvent($"MAGNETO{e}_SET", 4);
+                            FireLever($"MIXTURE_SET", $"MIXTURE{e}_SET", 16383);
+                            FireLever($"THROTTLE_SET", $"THROTTLE{e}_SET", 2458); // ~15%
+                        }
+                    }
                     _starterAttemptUtc = now;
                     _starterAttempts++;
                     Log($"[Pilot] Attempting engine start ({engines} engine(s)).");
                 }
+                if (_starterAttempts >= 8)
+                {
+                    ReleaseHeldStarters(s);
+                    Log("[Pilot] WARNING: engines did not start after repeated attempts; continuing anyway.");
+                    SetPhase(FlightPhase.TaxiOut);
+                    BeginTaxiOut(s);
+                }
                 return;
             }
+            // Engines are running: release held turbine starters once so they
+            // cannot wind up against a lighted engine.
+            ReleaseHeldStarters(s);
             // Request IFR clearance / flight following before departure.
             _atcRequests.Request(AtcRequestKind.IfreClearance, "preflight", MenuLinesFor(AtcRequestKind.IfreClearance));
             if (_aircraftKind == AircraftKind.Rotorcraft)
@@ -734,6 +884,8 @@ public sealed class PilotEngine : IDisposable
         _taxiRoute = null;
         _taxiInPlanned = false;
         _pushbackProgress = new PushbackProgress { StartedUtc = DateTime.UtcNow };
+        _pushbackDismissed = false;
+        _pushbackToggleFired = false;
         _departureRunwayName = null;
         // Pick the runway first so the taxi route can hold short correctly.
         PlanDeparture(s);
@@ -761,10 +913,33 @@ public sealed class PilotEngine : IDisposable
         if (pick is null) { Log("[Pilot] No suitable departure runway found."); return; }
         var (rw, name) = pick.Value;
         _departureRunwayName = name;
+        Log($"[Pilot] Departure runway {name} ({rw.LengthMeters:0} m). Ground graph: " +
+            $"{_departureAirport.Nodes.Count} nodes, {_departureAirport.HoldShortNodes.Count()} hold-shorts, " +
+            $"{_departureAirport.Nodes.Values.Sum(n => n.Edges.Count)} edges.");
 
         // Build the taxi route to the hold-short for that runway.
         var start = TaxiRouter.FindNearestNode(_departureAirport, s.Latitude, s.Longitude);
         if (start is null) { Log("[Pilot] No ground graph at departure airport; cannot taxi."); return; }
+        var holdShorts = TaxiRouter.HoldShortsFor(_departureAirport, name);
+        if (holdShorts.Count == 0)
+        {
+            Log($"[Pilot] No hold-short nodes serve runway {name} ({_departureAirport.HoldShortNodes.Count()} hold-short nodes total).");
+            var sample = _departureAirport.HoldShortNodes.Take(4)
+                .Select(n => $"#{n.Index} rw={n.RunwayNumber}/{n.RunwayDesignator} edges=[{string.Join(",", n.Edges.Where(e => e.PathType == TaxiPathType.Runway).Select(e => $"{e.RunwayNumber}/{e.RunwayDesignator}"))}]");
+            Log($"[Pilot] Hold-short sample: {string.Join(" | ", sample)}");
+        }
+        else
+        {
+            var probe = TaxiRouter.FindRoute(_departureAirport, start.Index, holdShorts[0].Index,
+                new TaxiConstraints
+                {
+                    RunwayName = name,
+                    HoldShortBefore = name,
+                    AircraftWeightLbs = (uint)s.GrossWeight,
+                });
+            if (!probe.Success)
+                Log($"[Pilot] Hold-short route probe failed: {probe.FailureReason} (weight {s.GrossWeight:0} lbs).");
+        }
         var holdShort = TaxiRouter.FindReachableHoldShort(_departureAirport, start.Index, name,
             new TaxiConstraints
             {
@@ -838,19 +1013,23 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
-        // Pushback first if the stand offers it and it hasn't been done.
-        if (s.Pushback.Available && !s.Pushback.Attached && !_pushbackDone)
+        // Pushback first if the stand offers it and it hasn't been done. The
+        // tug may already be attached — keep driving the pushback state
+        // machine until the planner says the push is complete or failed.
+        if ((s.Pushback.Available || s.Pushback.Attached) && !_pushbackDone)
         {
             ExecutePushback(s, t, now);
             return;
         }
         _pushbackDone = true;
 
-        // Wait for taxi clearance if the airport is towered.
-        if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTaxi && !_taxiClearanceRequested)
+        // Wait for taxi clearance if the airport is towered. Re-request every
+        // 60 s while still pending — a timed-out or denied request must not
+        // leave the aircraft waiting forever.
+        if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTaxi &&
+            RequestDue(AtcRequestKind.Taxi, ref _taxiClearanceRequested, ref _lastTaxiRequestUtc, now))
         {
             _atcRequests.Request(AtcRequestKind.Taxi, "taxi-out", MenuLinesFor(AtcRequestKind.Taxi));
-            _taxiClearanceRequested = true;
         }
 
         // Route to the runway and taxi.
@@ -862,10 +1041,10 @@ public sealed class PilotEngine : IDisposable
             // Reached the hold-short: hold position and request takeoff clearance.
             _ap.SetThrottleFraction(0);
             _ap.ParkingBrake(true);
-            if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTakeoff && !_takeoffClearanceRequested)
+            if (s.Atc.DepartureAirportIsTowered && !s.Atc.ClearedTakeoff &&
+                RequestDue(AtcRequestKind.Takeoff, ref _takeoffClearanceRequested, ref _lastTakeoffRequestUtc, now))
             {
                 _atcRequests.Request(AtcRequestKind.Takeoff, "hold-short", MenuLinesFor(AtcRequestKind.Takeoff));
-                _takeoffClearanceRequested = true;
             }
             if (!s.Atc.DepartureAirportIsTowered || s.Atc.ClearedTakeoff)
             {
@@ -917,13 +1096,35 @@ public sealed class PilotEngine : IDisposable
         return null;
     }
 
+    private string _lastTrafficSignature = "";
+    private bool _lastTrafficUnsafe;
+
     private void PublishTrafficStatus()
     {
         var a = _trafficAssessment;
+        // Signature uses coarse-grained values so the status refreshes a few
+        // times a minute at most, not every tick — Describe() embeds live
+        // distances that would otherwise change constantly.
+        var occupant = a.DepartureRunwayOccupant;
+        var onFinal = a.ArrivalOnDepartureRunway;
+        var signature =
+            $"{a.Contacts.Count}|{a.AirborneConflicts.Count}|" +
+            $"{(occupant is null ? -1 : (int)(occupant.RangeMeters / 100))}|" +
+            $"{(onFinal is null ? -1 : (int)(onFinal.RangeNauticalMiles * 2))}";
+        if (signature == _lastTrafficSignature) return;
+        _lastTrafficSignature = signature;
         lock (_lock)
         {
             _status.TrafficSummary = a.Contacts.Count == 0 ? "" : a.Describe();
             _status.TrafficContacts = a.Contacts.Count;
+        }
+
+        // Log only on transitions into/out of an unsafe assessment — the
+        // hold/go-around paths log their own throttled messages.
+        if (a.RunwayEntryUnsafe != _lastTrafficUnsafe)
+        {
+            _lastTrafficUnsafe = a.RunwayEntryUnsafe;
+            Log($"[Traffic] {(a.RunwayEntryUnsafe ? "conflict: " : "clear: ")}{a.Describe()}");
         }
     }
 
@@ -944,8 +1145,29 @@ public sealed class PilotEngine : IDisposable
     }
 
     private bool _pushbackDone;
+    private bool _pushbackDismissed;
+    private bool _pushbackToggleFired;
+    private DateTime _pushbackDismissUtc;
+    private static readonly TimeSpan PushbackDetachTimeout = TimeSpan.FromSeconds(20);
     private bool _taxiClearanceRequested;
     private bool _takeoffClearanceRequested;
+    private DateTime _lastTaxiRequestUtc = DateTime.MinValue;
+    private DateTime _lastTakeoffRequestUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// True when an ATC request should be (re)issued: the first time, or every
+    /// 60 s after the previous attempt ended (timeout/denial) — never while the
+    /// same kind is still being probed.
+    /// </summary>
+    private bool RequestDue(AtcRequestKind kind, ref bool requested, ref DateTime lastUtc, DateTime now)
+    {
+        var inFlight = _atcRequests.Pending == kind && _atcRequests.Status == AtcRequestStatus.Requested;
+        if (inFlight) return false;
+        if (requested && now - lastUtc < TimeSpan.FromSeconds(60)) return false;
+        requested = true;
+        lastUtc = now;
+        return true;
+    }
 
     /// <summary>True when departing an airport on a water runway (float/amphib).</summary>
     private bool DepartureOnWater()
@@ -966,9 +1188,41 @@ public sealed class PilotEngine : IDisposable
     /// <summary>Whether the landing gear should be extended for the arrival.</summary>
     private bool ArrivalNeedsGear() => !ArrivalOnWater();
 
+    private (double lat, double lon)? _lastPushPos;
+    private DateTime _lastPushMoveUtc = DateTime.MinValue;
+
     private void ExecutePushback(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
+
+        // Feed observed tug state into the progress record — without this the
+        // planner can never see the attach or any movement, so towing always
+        // reads as "still settling" and a detached tug ends in GiveUp.
+        if (s.Pushback.Attached && !_pushbackProgress.SawTug)
+        {
+            _pushbackProgress = _pushbackProgress with
+            {
+                SawTug = true,
+                AttachedUtc = now,
+                AttachPoint = (s.Latitude, s.Longitude),
+                LastMovedUtc = now,
+            };
+        }
+        if (s.Pushback.Attached)
+        {
+            var moved = _lastPushPos is { } lp &&
+                GeoMath.DistanceMeters(lp.lat, lp.lon, s.Latitude, s.Longitude) > 0.5;
+            if (moved) _lastPushMoveUtc = now;
+            _lastPushPos = (s.Latitude, s.Longitude);
+            _pushbackProgress = _pushbackProgress with
+            {
+                SawTug = true,
+                LastMovedUtc = _lastPushMoveUtc == DateTime.MinValue ? now : _lastPushMoveUtc,
+                OffParking = !(s.Atc?.OnParkingSpot ?? false),
+            };
+        }
+        else _lastPushPos = null;
+
         var decision = PushbackPlanner.Decide(s, _pushbackProgress, utcNow: now);
         switch (decision)
         {
@@ -992,11 +1246,40 @@ public sealed class PilotEngine : IDisposable
                 _ap.ParkingBrake(false);
                 break;
             case PushbackDecision.Dismiss:
-                // Release the tug and continue the taxi.
-                _aircraft.SimConnect.FireEvent("TUG_DISABLE");
+                if (!s.Pushback.Attached)
+                {
+                    // Tug released (or never attached after moving enough):
+                    // pushback is done — proceed to the taxi route.
+                    _pushbackDone = true;
+                    _ap.ParkingBrake(true);
+                    break;
+                }
+                if (!_pushbackDismissed)
+                {
+                    _pushbackDismissed = true;
+                    _pushbackDismissUtc = now;
+                    _pushbackProgress = _pushbackProgress with { Requested = false };
+                    _aircraft.SimConnect.FireEvent("TUG_DISABLE");
+                    Log("[Pilot] Pushback complete; releasing tug.");
+                }
+                else
+                {
+                    // The tug ignored TUG_DISABLE — escalate like the previous
+                    // pilot did instead of firing the event every tick.
+                    var waited = now - _pushbackDismissUtc;
+                    if (waited > PushbackDetachTimeout && !_pushbackToggleFired)
+                    {
+                        _pushbackToggleFired = true;
+                        _aircraft.SimConnect.FireEvent("TOGGLE_PUSHBACK");
+                        Log("[Pilot] Tug still attached; toggling pushback to release.");
+                    }
+                    if (waited > PushbackDetachTimeout * 3)
+                    {
+                        _pushbackDone = true;
+                        Log("[Pilot] Tug still attached; taxiing out anyway.");
+                    }
+                }
                 _ap.ParkingBrake(true);
-                _pushbackProgress = _pushbackProgress with { Requested = false };
-                Log("[Pilot] Pushback complete; releasing tug.");
                 break;
             case PushbackDecision.GiveUp:
                 _aircraft.SimConnect.FireEvent("TUG_DISABLE");
@@ -1062,7 +1345,7 @@ public sealed class PilotEngine : IDisposable
         var vy = perf.ClimbSpeed > 0 ? perf.ClimbSpeed : Math.Max(vr * 1.1, 70);
 
         t.TargetHeadingDeg = _departureAirport is not null && _departureRunwayName is not null
-            ? _departureAirport.FindRunway(_departureRunwayName)?.HeadingDegTrue
+            ? _departureAirport.FindRunway(_departureRunwayName)?.TravelHeadingDeg(_departureRunwayName)
             : (double?)null;
         t.TargetAirspeedKt = vy;
         t.ThrottleFraction = 1.0;
@@ -1124,6 +1407,7 @@ public sealed class PilotEngine : IDisposable
             var (_, heading, target) = _nav.Update(s, _routeNav);
             t.TargetHeadingDeg = heading;
             t.TrackNav = true;
+            LogNavProgress();
 
             // Slow to turbulence penetration speed when rough.
             if (turbulence is TurbulenceLevel.Moderate or TurbulenceLevel.Severe)
@@ -1150,11 +1434,10 @@ public sealed class PilotEngine : IDisposable
         // higher altitude than the current target — climb early.
         ApplyTerrainClearance(s, t, aheadNm: 12);
 
-        // Gear: retract once comfortably airborne, re-extend on short final —
-        // but never for a water arrival (floatplanes/amphibians wheels-up).
-        if (!ArrivalNeedsGear()) t.GearDown = false;
-        else if (s.AltitudeAGL > 2500) t.GearDown = false;
-        else if (s.AltitudeAGL < 600) t.GearDown = true;
+        // Gear: retract once comfortably airborne; re-extension is handled by
+        // the descent/approach phases. Extending here re-cycled the gear every
+        // time the initial climb passed back through 600 ft AGL.
+        if (!ArrivalNeedsGear() || s.AltitudeAGL > 2500) t.GearDown = false;
     }
 
     // ----- Rotorcraft -----
@@ -1297,6 +1580,7 @@ public sealed class PilotEngine : IDisposable
             var (_, heading, _) = _nav.Update(s, _routeNav);
             t.TargetHeadingDeg = heading;
             t.TrackNav = true;
+            LogNavProgress();
         }
         else
         {
@@ -1387,7 +1671,7 @@ public sealed class PilotEngine : IDisposable
         if (_departureAirport is null) return s.TrueHeading;
         if (_departureRunwayName is not null)
         {
-            var h = _departureAirport.FindRunway(_departureRunwayName)?.HeadingDegTrue;
+            var h = _departureAirport.FindRunway(_departureRunwayName)?.TravelHeadingDeg(_departureRunwayName);
             if (h is not null) return h.Value;
         }
         return _destinationAirport is not null
@@ -1401,7 +1685,7 @@ public sealed class PilotEngine : IDisposable
         if (_destinationAirport is null) return s.TrueHeading;
         if (_arrivalRunwayName is not null)
         {
-            var h = _destinationAirport.FindRunway(_arrivalRunwayName)?.HeadingDegTrue;
+            var h = _destinationAirport.FindRunway(_arrivalRunwayName)?.TravelHeadingDeg(_arrivalRunwayName);
             if (h is not null) return h.Value;
         }
         return _departureAirport is not null
@@ -1602,14 +1886,16 @@ public sealed class PilotEngine : IDisposable
         if (threshold is not null)
         {
             // Fly the extended centreline to the threshold.
-            var brg = rw is not null ? rw.HeadingDegTrue : GeoMath.BearingDeg(threshold.Value.Item1, threshold.Value.Item2, s.Latitude, s.Longitude);
+            var brg = rw is not null
+                ? rw.TravelHeadingDeg(_arrivalRunwayName)
+                : GeoMath.BearingDeg(s.Latitude, s.Longitude, threshold.Value.Item1, threshold.Value.Item2);
             t.TargetHeadingDeg = brg;
         }
 
         var vapp = _performance.Vapp > 0 ? _performance.Vapp : (_performance.ApproachSpeed > 0 ? _performance.ApproachSpeed : 80);
         // Add wind/ice/turbulence increments.
         var (headwind, _) = WeatherModel.WindComponents(s.WindDirection, s.WindVelocity, t.TargetHeadingDeg ?? s.TrueHeading);
-        vapp += WeatherModel.ApproachWindIncrementKt(Math.Max(0, headwind))
+        vapp += WeatherModel.ApproachWindIncrementKt(headwind)
               + WeatherModel.ApproachIceIncrementKt(s.StructuralIcePercent)
               + WeatherModel.ApproachTurbulenceIncrementKt(turbulence);
         t.TargetAirspeedKt = vapp;
@@ -1759,10 +2045,17 @@ public sealed class PilotEngine : IDisposable
     public async Task<bool> PlanFlightAsync(AirportData destination, CancellationToken ct = default)
     {
         var s = _aircraft.GetSnapshot();
-        _departureAirport ??= await FindNearestAirportAsync(s, ct);
-        if (_departureAirport is null) { Log("[Pilot] Cannot determine departure airport."); return false; }
-        _destinationAirport = destination;
-        return await BuildAndLoadRouteAsync(s, ct);
+        // Same gate as continuous planning — acquire before mutating any
+        // shared fields so a rejected call leaves state untouched.
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try
+        {
+            _departureAirport ??= await FindNearestAirportAsync(s, ct);
+            if (_departureAirport is null) { Log("[Pilot] Cannot determine departure airport."); return false; }
+            _destinationAirport = destination;
+            return await BuildAndLoadRouteAsync(s, ct);
+        }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
     }
 
     private async Task<bool> BuildAndLoadRouteAsync(AircraftState s, CancellationToken ct = default)
@@ -1941,6 +2234,20 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Continuous flights ----------------
 
+    /// <summary>
+    /// Plans at most one leg at a time. The turnaround timer and the Shutdown
+    /// retry can both fire near the end of a service window — without the gate
+    /// they would pick destinations and build routes concurrently.
+    /// </summary>
+    private int _routePlanning;
+
+    private async Task<bool> TryPlanNextLegAsync(CancellationToken ct)
+    {
+        if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
+        try { return await PlanNextLegAsync(ct); }
+        finally { Interlocked.Exchange(ref _routePlanning, 0); }
+    }
+
     private async Task<bool> PlanNextLegAsync(CancellationToken ct)
     {
         var s = _aircraft.GetSnapshot();
@@ -1963,6 +2270,7 @@ public sealed class PilotEngine : IDisposable
         _destinationAirport = dest;
         _departureRunwayName = null;
         _arrivalRunwayName = null;
+        _atcRequests.Reset(); // clearances from the previous leg do not carry over
         var ok = await BuildAndLoadRouteAsync(s, ct);
         if (ok) _legsFlown++;
         return ok;
@@ -1970,14 +2278,24 @@ public sealed class PilotEngine : IDisposable
 
     private double EstimateRangeNm(AircraftState s)
     {
+        // Published max range (flightchecklist.app quick-ref) caps the estimate;
+        // the fuel-flow model refines it downward when live fuel data exists.
+        var cap = _performance.MaxRangeNm > 0 ? _performance.MaxRangeNm : _planner.MaxRangeNm;
         // Still-air range ≈ fuel weight / fuel flow * speed. Rough but serviceable.
-        if (s.EngineFF.Length == 0 || s.EngineFF.All(f => f <= 0)) return _planner.MaxRangeNm;
-        var ffTotal = s.EngineFF.Sum();
+        var ffTotal = s.EngineFF.Length > 0 ? s.EngineFF.Sum() : 0;
         var fuelLb = s.TotalFuelWeight > 0 ? s.TotalFuelWeight : _performance.MaxFuelWeight;
-        if (ffTotal <= 0 || fuelLb <= 0) return _planner.MaxRangeNm;
+        if (fuelLb <= 0) return cap;
+        if (ffTotal <= 0)
+        {
+            // Engines off (just landed / cold start): FF reads zero, so fall
+            // back to a conservative fraction of the published range rather
+            // than assuming full tanks.
+            var frac = _performance.MaxFuelWeight > 0 ? Math.Clamp(fuelLb / _performance.MaxFuelWeight, 0.15, 1.0) : 0.5;
+            return cap * frac;
+        }
         var hours = fuelLb / ffTotal * 0.85; // 85% usable
         var gs = Math.Max(s.GroundSpeed, cruiseSpeedKt());
-        return hours * gs * 0.9; // reserve
+        return Math.Min(hours * gs * 0.9, cap); // reserve
     }
 
     private void BeginTurnaround(AircraftState s)
@@ -1994,9 +2312,11 @@ public sealed class PilotEngine : IDisposable
         _taxiRoute = null;
         _taxiInPlanned = false;
         _pushbackDone = false;
+        _pushbackDismissed = false;
+        _pushbackToggleFired = false;
         _taxiClearanceRequested = false;
         _takeoffClearanceRequested = false;
-        _checklists.Reset(ChecklistPhase.Preflight);
+        _checklists.Reset();
         SetPhase(FlightPhase.Shutdown);
         Log($"[Pilot] Turnaround: servicing for {_serviceMinutes} min, then next leg.");
         PublishStatus();
@@ -2009,8 +2329,9 @@ public sealed class PilotEngine : IDisposable
                 while (_serviceUntilUtc > DateTime.UtcNow) await Task.Delay(1000);
                 if (ContinuousEnabled)
                 {
-                    await PlanNextLegAsync(CancellationToken.None);
-                    if (_route is not null) SetPhase(FlightPhase.Preflight);
+                    await TryPlanNextLegAsync(CancellationToken.None);
+if (_route is not null && (_status.Phase is FlightPhase.Preflight or FlightPhase.Unknown))
+            SetPhase(FlightPhase.Preflight);
                 }
             }
             catch (Exception ex) { Log($"[Pilot] Next-leg planning failed: {ex.Message}"); }
@@ -2019,22 +2340,80 @@ public sealed class PilotEngine : IDisposable
 
     // ---------------- Aircraft identity / performance ----------------
 
+    private readonly object _identityLock = new();
+    private int _webIdentityQueued;
+
     private void OnTitleChanged(string title)
     {
         lock (_lock) { _status.AircraftTitle = title; }
         PublishStatus();
+        // No package directory resolved (the AircraftLoaded hint never arrived
+        // or points nowhere usable): the TITLE SimVar plus the bundled
+        // flightchecklist.app library are the whole identity. Load specs and
+        // checklists from the web data on a worker thread — bundled hits are
+        // instant, a live fetch can take seconds and must not stall the loop.
+        if (string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory))
+            QueueWebIdentity(title);
+    }
+
+    private void QueueWebIdentity(string title)
+    {
+        if (Interlocked.Exchange(ref _webIdentityQueued, 1) == 1) return;
+        _ = Task.Run(() =>
+        {
+            try { LoadWebIdentity(title); }
+            catch (Exception ex) { Log($"[Pilot] Web identity load failed: {ex.Message}"); }
+            finally { Interlocked.Exchange(ref _webIdentityQueued, 0); }
+        });
+    }
+
+    /// <summary>
+    /// Title-driven identity for aircraft whose package directory never
+    /// resolved: performance and checklists come from flightchecklist.app
+    /// (bundled copy first), kind detection uses title keywords + web type.
+    /// </summary>
+    private void LoadWebIdentity(string title)
+    {
+        lock (_identityLock)
+        {
+            // A package directory may have resolved while this was queued;
+            // the cfg path is authoritative when it exists.
+            if (!string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory)) return;
+            _performance = new AircraftPerformance();
+            LoadChecklists();
+            _aircraftKind = AircraftKindDetector.Detect(null, title, _performance);
+            _planner.Kind = _aircraftKind;
+            if (_aircraftKind == AircraftKind.Rotorcraft)
+            {
+                _planner.RequiredRunwayMeters = 0;
+                _planner.MinRangeNm = 10;
+            }
+            lock (_lock) _status.AircraftKind = _aircraftKind;
+            Log($"[Pilot] Aircraft: {title} — {_aircraftKind} (flightchecklist.app, no package cfg)");
+            PublishStatus();
+        }
     }
 
     private void OnAircraftDirectoryChanged(string dir)
     {
-        try
+        lock (_identityLock)
         {
+            try
+            {
             _performance = AircraftConfigParser.ParseAircraftConfig(dir);
-            _checklists.Reload(dir);
+            LoadChecklists();
             _aircraftKind = AircraftKindDetector.Detect(dir, _aircraft.AircraftTitle, _performance);
             _planner.Kind = _aircraftKind;
+            // The TITLE SimVar falls back to a stale/default title when the
+            // package's aircraft.cfg has no title= field (deltas_c17 reports
+            // "Cessna 172" while actually being a C-17). The resolved cfg is
+            // authoritative once the package directory is known.
+            var displayTitle = !string.IsNullOrWhiteSpace(_performance.Title)
+                ? _performance.Title
+                : _aircraft.AircraftTitle;
+            lock (_lock) _status.AircraftTitle = displayTitle;
             lock (_lock) _status.AircraftKind = _aircraftKind;
-            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind}");
+            Log($"[Pilot] Aircraft: {_performance.Title} ({_performance.IcaoType}) — {_aircraftKind} [{_aircraft.AircraftDirectory}]");
 
             if (_aircraftKind == AircraftKind.Rotorcraft)
             {
@@ -2045,8 +2424,91 @@ public sealed class PilotEngine : IDisposable
             {
                 Log($"[Pilot] {_aircraftKind}: water runways preferred for all legs.");
             }
+            PublishStatus();
+            }
+            catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
         }
-        catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Loads the aircraft's own checklist set (2024 SimBase XML or legacy text
+    /// format, with checkpoint libraries and .loc localization), falling back to
+    /// the built-in procedural flow when the package ships none.
+    /// </summary>
+    private void LoadChecklists()
+    {
+        // The aircraft directory is already resolved by SimAircraft (the
+        // AircraftLoaded path hint); pass it as the override so the parser
+        // does not rescan every package root by title.
+        // The TITLE SimVar can be stale when the package cfg lacks a title=
+        // field; the parsed cfg identity is authoritative for matching.
+        var title = !string.IsNullOrWhiteSpace(_performance.Title)
+            ? _performance.Title
+            : _aircraft.AircraftTitle;
+        if (string.IsNullOrWhiteSpace(title) || title.StartsWith("$$", StringComparison.Ordinal))
+            title = "";
+        var set = ChecklistParser.ParseFromAircraft(title,
+            rootOverride: string.IsNullOrWhiteSpace(_aircraft.AircraftDirectory) ? null : _aircraft.AircraftDirectory);
+
+        // The package ships no readable checklist XML (encrypted VFS or
+        // third-party aircraft): consult the flightchecklist.app library —
+        // bundled copy first, then the per-user cache, then the live site.
+        // Runs on the identity worker thread, so blocking on the fetch is safe.
+        // The same page also carries the "Quick Reference" spec sheet, which
+        // replaces the .cfg-derived performance fields (title stays from the sim).
+        try
+        {
+            var bundle = FlightChecklistProvider.TryLoadBundleAsync(title, _performance.IcaoType,
+                CancellationToken.None).GetAwaiter().GetResult();
+            if (bundle?.Performance is not null)
+            {
+                MergeWebPerformance(bundle.Performance);
+                Log($"[Pilot] Specs from flightchecklist.app: range {_performance.MaxRangeNm:0}nm, " +
+                    $"ceil {_performance.CruisePerf.MaxCruiseAltitude:0}ft, weight {_performance.MaxGrossWeight:0}lb.");
+            }
+            if (bundle?.Checklists is { IsLoaded: true } web && !set.IsLoaded) set = web;
+        }
+        catch (Exception ex) { Log($"[Checklist] flightchecklist.app lookup failed: {ex.Message}"); }
+
+        if (!set.IsLoaded)
+        {
+            var turbine = _performance.EngineType.Contains("TURBO", StringComparison.OrdinalIgnoreCase) ||
+                          _performance.EngineType.Contains("JET", StringComparison.OrdinalIgnoreCase) ||
+                          _aircraftKind == AircraftKind.Rotorcraft;
+            // The package cfg (icao_engine_count) is authoritative for how many
+            // engines the aircraft models; NUMBER OF ENGINES can under-report on
+            // add-ons, so it is only a fallback when the cfg has no count.
+            var engines = _performance.EngineCount > 0
+                ? _performance.EngineCount
+                : Math.Max(1, _aircraft.GetSnapshot().EngineCount);
+            set = GenericChecklists.Create(title, turbine, engines);
+        }
+        foreach (var note in set.Notes.Take(5)) Log($"[Checklist] {note}");
+        _checklists.Load(set);
+        Log($"[Checklist] Loaded {set.Lists.Count} lists ({set.Format}) from '{_aircraft.AircraftDirectory}'.");
+    }
+
+    /// <summary>
+    /// Overlays the flightchecklist.app "Quick Reference" spec sheet onto the
+    /// cfg-parsed performance. Per product decision the web specs replace the
+    /// .cfg performance data; only Title/IcaoType/Category (aircraft identity)
+    /// are kept from the simobject cfg. Fields the site does not publish keep
+    /// their cfg values.
+    /// </summary>
+    private void MergeWebPerformance(AircraftPerformance web)
+    {
+        var p = _performance;
+        if (web.EngineCount > 0) p.EngineCount = web.EngineCount;
+        if (!string.IsNullOrEmpty(web.EngineType)) p.EngineType = web.EngineType;
+        if (web.MaxThrustPerEngine > 0) p.MaxThrustPerEngine = web.MaxThrustPerEngine;
+        if (web.Vno > 0) p.Vno = web.Vno;
+        if (web.MaxRangeNm > 0) p.MaxRangeNm = web.MaxRangeNm;
+        if (web.MaxGrossWeight > 0) p.MaxGrossWeight = web.MaxGrossWeight;
+        if (web.MaxTakeoffWeight > 0) p.MaxTakeoffWeight = web.MaxTakeoffWeight;
+        if (web.MaxLandingWeight > 0) p.MaxLandingWeight = web.MaxLandingWeight;
+        if (web.CruisePerf.DefaultCruiseSpeed > 0) p.CruisePerf.DefaultCruiseSpeed = web.CruisePerf.DefaultCruiseSpeed;
+        if (web.CruiseSpeedKt > 0) p.CruiseSpeedKt = web.CruiseSpeedKt;
+        if (web.CruisePerf.MaxCruiseAltitude > 0) p.CruisePerf.MaxCruiseAltitude = web.CruisePerf.MaxCruiseAltitude;
     }
 
     private void OnStateUpdated(AircraftState s)
@@ -2054,14 +2516,47 @@ public sealed class PilotEngine : IDisposable
         PublishStatusThrottled();
     }
 
+    private string? _logFilePath;
+    private readonly object _logFileLock = new();
+    private int _logFileLines;
+
     private void Log(string msg)
     {
-        OnLog?.Invoke($"{DateTime.Now:HH:mm:ss} {msg}");
+        var line = $"{DateTime.Now:HH:mm:ss} {msg}";
+        try { OnLog?.Invoke(line); } catch { /* a dead subscriber must not break the loop */ }
+        // Mirror every line to a daily log file for post-flight analysis.
+        // Bounded size: once a day-file exceeds ~4 MB it is rotated aside so
+        // continuous flights cannot grow it without limit.
+        try
+        {
+            lock (_logFileLock)
+            {
+                if (_logFilePath is null)
+                {
+                    var dir = Path.Combine(
+                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                        "AICopilotFS");
+                    Directory.CreateDirectory(dir);
+                    _logFilePath = Path.Combine(dir, $"pilot-{DateTime.Now:yyyyMMdd}.log");
+                }
+                if (_logFileLines >= 60000)
+                {
+                    var rotated = _logFilePath + ".1";
+                    try { File.Delete(rotated); } catch { }
+                    try { File.Move(_logFilePath, rotated); } catch { }
+                    _logFileLines = 0;
+                }
+                File.AppendAllText(_logFilePath, line + System.Environment.NewLine);
+                _logFileLines++;
+            }
+        }
+        catch { /* logging must never break the flight loop */ }
     }
 
     private void PublishStatus()
     {
         PilotStatus copy;
+        var checklist = _checklists.Status();
         lock (_lock)
         {
             copy = new PilotStatus
@@ -2079,11 +2574,13 @@ public sealed class PilotEngine : IDisposable
                 DistanceToGoNm = _status.DistanceToGoNm,
                 EtaMinutes = _status.EtaMinutes,
                 ServiceMinutesRemaining = _status.ServiceMinutesRemaining,
-                ChecklistActive = _checklists.Current is { Complete: false },
-                CurrentChecklistItem = _checklists.Current is { } c && c.CurrentIndex < c.Items.Count
-                    ? c.Items[c.CurrentIndex].Text : "",
-                ChecklistPhaseName = _checklists.Current?.Title ?? _checklists.CurrentPhase.ToString(),
-                ChecklistProgress = _checklists.Current?.Progress ?? 0,
+                ChecklistActive = checklist.Loaded && checklist.Enabled,
+                CurrentChecklistItem = checklist.Loaded && checklist.Item.Length > 0
+                    ? checklist.Item + (checklist.Expectation.Length > 0 ? $" — {checklist.Expectation}" : "") : "",
+                ChecklistPhaseName = checklist.Loaded && checklist.Step.Length > 0
+                    ? checklist.Step : checklist.Source,
+                ChecklistProgress = checklist.Loaded && checklist.Count > 0
+                    ? (double)checklist.Index / checklist.Count : 0,
                 TrafficSummary = _status.TrafficSummary,
                 TrafficContacts = _status.TrafficContacts,
                 LastError = _status.LastError,
@@ -2097,6 +2594,7 @@ public sealed class PilotEngine : IDisposable
         _loopCts?.Cancel();
         try { _loopTask?.Wait(2000); } catch { }
         Disengage();
+        _checklistHost.Dispose();
         _aircraft.SimConnect.OnDataReceived -= _traffic.OnData;
         _traffic.Dispose();
         _facilities.Dispose();

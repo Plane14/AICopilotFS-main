@@ -42,21 +42,23 @@ public static class BacktrackPlanner
             along = a;
         }
 
-        var ahead = RunwayAheadOf(runway, along);
+        var ahead = RunwayAheadOf(runway, along, runwayName);
         return ahead < requiredRunMeters * RunwayMargin && ahead > 0;
     }
 
     /// <summary>
     /// How much runway lies ahead of a point <paramref name="alongRunway"/> meters
-    /// from the runway centre towards the takeoff direction. The runway centre is
-    /// at LengthMeters/2 from either end.
+    /// from the primary end along the runway axis, in the direction of travel
+    /// for the named runway end.
     /// </summary>
-    public static double RunwayAheadOf(RunwayInfo runway, double alongRunway)
+    public static double RunwayAheadOf(RunwayInfo runway, double alongRunway, string? runwayName = null)
     {
-        // alongRunway is distance from primary end along the runway axis.
-        var fromPrimary = alongRunway;
-        // Takeoff direction is from the threshold towards the far end.
-        return runway.LengthMeters - fromPrimary;
+        // alongRunway is distance from the primary end towards the secondary end.
+        // Secondary-name operations fly towards the primary end, so the runway
+        // ahead is `along`; primary-name operations fly the other way.
+        var flyingTowardPrimary = !string.IsNullOrWhiteSpace(runwayName) &&
+            runway.SecondaryName.Equals(runwayName.Trim(), StringComparison.OrdinalIgnoreCase);
+        return flyingTowardPrimary ? alongRunway : runway.LengthMeters - alongRunway;
     }
 
     /// <summary>
@@ -69,6 +71,6 @@ public static class BacktrackPlanner
         if (threshold is null) return null;
         // Threshold is at the near end; the turn point is just past it onto the strip.
         // Runway heading points down the strip from the threshold.
-        return GeoMath.Destination(threshold.Value.lat, threshold.Value.lon, runway.HeadingDegTrue, TurnStandoffMeters);
+        return GeoMath.Destination(threshold.Value.lat, threshold.Value.lon, runway.TravelHeadingDeg(runwayName), TurnStandoffMeters);
     }
 }

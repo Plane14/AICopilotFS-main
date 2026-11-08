@@ -43,6 +43,15 @@ public sealed class SimulatorPathsConfig
             config.UserCfgPath = S("userCfgPath");
             config.FlightPlanPath = S("flightPlanPath");
             config.MsfsExecutablePath = S("msfsExecutablePath");
+            if (doc.TryGetValue("additionalAircraftSearchRoots", out var roots) &&
+                roots.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var r in roots.EnumerateArray())
+                    if (r.ValueKind == System.Text.Json.JsonValueKind.String && r.GetString() is { Length: > 0 } s)
+                        list.Add(s);
+                config.AdditionalAircraftSearchRoots = list;
+            }
         }
         catch { }
         return config;
@@ -185,6 +194,8 @@ public sealed class MsfsInstallLayout
     internal static IEnumerable<string> DefaultUserCfgCandidates(string localAppData, string applicationData, string storePackageFamily)
     {
         yield return Path.Combine(applicationData, "Microsoft Flight Simulator 2024", "UserCfg.opt");
+        // Store edition keeps per-user config under the package's LocalCache\Roaming.
+        yield return Path.Combine(localAppData, "Packages", storePackageFamily, "LocalCache", "Roaming", "Microsoft Flight Simulator 2024", "UserCfg.opt");
         yield return Path.Combine(localAppData, "Packages", storePackageFamily, "LocalCache", "UserCfg.opt");
         yield return Path.Combine(localAppData, "Packages", storePackageFamily, "LocalState", "UserCfg.opt");
     }
@@ -196,15 +207,25 @@ public sealed class MsfsInstallLayout
             foreach (var line in File.ReadLines(userCfgPath))
             {
                 var t = line.Trim();
-                if (!t.StartsWith("InstalledPackagesPath", StringComparison.OrdinalIgnoreCase)) continue;
-                var q1 = t.IndexOf('"');
+                const string key = "InstalledPackagesPath";
+                if (!t.StartsWith(key, StringComparison.OrdinalIgnoreCase)) continue;
+                // Anchor the match: the key must be followed by whitespace, '=' or a quote.
+                if (t.Length > key.Length)
+                {
+                    var next = t[key.Length];
+                    if (!char.IsWhiteSpace(next) && next != '=' && next != '"') continue;
+                }
+                var rest = t[key.Length..].TrimStart();
+                if (rest.StartsWith('=')) rest = rest[1..].TrimStart();
+                var q1 = rest.IndexOf('"');
                 if (q1 >= 0)
                 {
-                    var q2 = t.IndexOf('"', q1 + 1);
-                    if (q2 > q1) return t.Substring(q1 + 1, q2 - q1 - 1);
+                    var q2 = rest.IndexOf('"', q1 + 1);
+                    if (q2 > q1) return rest.Substring(q1 + 1, q2 - q1 - 1);
                 }
-                var parts = t.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                var parts = rest.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length == 2) return parts[1].Trim().Trim('"');
+                if (parts.Length == 1 && rest.Length > 0 && !rest.Contains(' ')) return rest.Trim('"');
             }
         }
         catch { }

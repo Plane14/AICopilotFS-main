@@ -205,20 +205,73 @@ public static class TaxiRouter
         return bestDist < 300 ? best : null;
     }
 
-    /// <summary>True when a hold-short node guards the given runway (via its runway-type paths).</summary>
+    /// <summary>
+    /// True when a hold-short node guards the given runway. A taxi point payload carries
+    /// no runway of its own; the association is recovered from (in order): the runway
+    /// number propagated onto the node from runway-type paths, runway-type edges touching
+    /// the node, runway numbers on nearby graph nodes (hold-shorts usually connect to the
+    /// runway through intermediate taxi points), and finally proximity to the named
+    /// threshold - some airports publish no runway-tagged paths at all.
+    /// </summary>
     public static bool HoldShortServesRunway(AirportData airport, GroundNode node, string runwayName)
     {
         if (string.IsNullOrEmpty(runwayName)) return true;
         var runway = airport.FindRunway(runwayName);
         if (runway is null) return true;
+
+        bool NameMatches(int number, int designator) =>
+            number > 0 && RunwayInfo.RunwayName(number, designator)
+                .Equals(runwayName, StringComparison.OrdinalIgnoreCase);
+
+        if (NameMatches(node.RunwayNumber, node.RunwayDesignator)) return true;
+
         foreach (var edge in node.Edges)
         {
             if (edge.PathType != TaxiPathType.Runway || edge.RunwayNumber == 0) continue;
-            var name = RunwayInfo.RunwayName(edge.RunwayNumber, edge.RunwayDesignator);
-            if (name.Equals(runwayName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (NameMatches(edge.RunwayNumber, edge.RunwayDesignator)) return true;
         }
-        // Fall back: node near either threshold of that runway.
-        return false;
+
+        // The runway-tagged path often sits a few taxi edges away from the hold-short
+        // itself; walk outward through non-runway edges looking for a node that carries
+        // a runway number.
+        var seen = new HashSet<int> { node.Index };
+        var frontier = new Queue<GroundNode>();
+        frontier.Enqueue(node);
+        for (var depth = 0; depth < 4 && frontier.Count > 0; depth++)
+        {
+            var next = new Queue<GroundNode>();
+            while (frontier.Count > 0)
+            {
+                var cur = frontier.Dequeue();
+                foreach (var edge in cur.Edges)
+                {
+                    if (edge.PathType == TaxiPathType.Runway || edge.PathType is TaxiPathType.Closed or TaxiPathType.Vehicle or TaxiPathType.None)
+                        continue;
+                    if (!seen.Add(edge.To)) continue;
+                    var n = airport.FindNode(edge.To);
+                    if (n is null) continue;
+                    if (NameMatches(n.RunwayNumber, n.RunwayDesignator)) return true;
+                    next.Enqueue(n);
+                }
+            }
+            frontier = next;
+        }
+
+        // Last resort: proximity to the named threshold. Only accept when this hold-short
+        // is closer to that threshold than to any other runway end at the field.
+        var threshold = runway.ThresholdFor(runwayName);
+        if (threshold is null) return false;
+        var d = GeoMath.DistanceMeters(node.Latitude, node.Longitude, threshold.Value.lat, threshold.Value.lon);
+        if (d > 800) return false;
+        foreach (var other in airport.Runways)
+        {
+            foreach (var end in new[] { other.PrimaryEnd, other.SecondaryEnd })
+            {
+                var od = GeoMath.DistanceMeters(node.Latitude, node.Longitude, end.lat, end.lon);
+                if (od + 1 < d) return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>Hold-short nodes attached to the given runway.</summary>

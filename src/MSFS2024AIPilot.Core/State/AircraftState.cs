@@ -107,6 +107,7 @@ public sealed class AircraftState
     public double[] EngineN2 { get; set; } = [];
     public double[] EngineFF { get; set; } = [];          // fuel flow, lb/h
     public double[] EngineThrottle { get; set; } = [];    // 0..1
+    public bool[] EngineStarter { get; set; } = [];       // starter motor engaged, per engine
     public double[] EngineEgtC { get; set; } = [];        // Celsius
     public double[] EngineMaxRpmPct { get; set; } = [];
     public double TotalFuelWeight { get; set; }           // lb
@@ -158,6 +159,7 @@ public sealed class AircraftState
         c.EngineN2 = (double[])EngineN2.Clone();
         c.EngineFF = (double[])EngineFF.Clone();
         c.EngineThrottle = (double[])EngineThrottle.Clone();
+        c.EngineStarter = (bool[])EngineStarter.Clone();
         c.EngineEgtC = (double[])EngineEgtC.Clone();
         c.EngineMaxRpmPct = (double[])EngineMaxRpmPct.Clone();
         c.Autopilot = Autopilot.Clone();

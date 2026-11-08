@@ -58,12 +58,15 @@ public sealed class TerrainElevations
 
         var result = new double?[points.Count];
         var missing = new List<int>();
-        for (var i = 0; i < points.Count; i++)
+        lock (_gate)
         {
-            if (_cache.TryGetValue(CacheKey(points[i].lat, points[i].lon), out var cached))
-                result[i] = cached;
-            else
-                missing.Add(i);
+            for (var i = 0; i < points.Count; i++)
+            {
+                if (_cache.TryGetValue(CacheKey(points[i].lat, points[i].lon), out var cached))
+                    result[i] = cached;
+                else
+                    missing.Add(i);
+            }
         }
         if (missing.Count == 0) return result.Select(v => v!.Value).ToArray();
 
@@ -149,10 +152,12 @@ public sealed class TerrainElevations
     {
         try
         {
+            string json;
+            lock (_gate) json = JsonSerializer.Serialize(_cache);
             var dir = Path.GetDirectoryName(_cachePath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             var tmp = _cachePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(_cache));
+            File.WriteAllText(tmp, json);
             File.Move(tmp, _cachePath, overwrite: true);
         }
         catch { /* cache write failure is non-fatal */ }

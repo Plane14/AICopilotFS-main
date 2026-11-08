@@ -27,6 +27,11 @@ public sealed class SimConnectClient : IDisposable
     private uint _nextDefineId = 1;
     private uint _nextRequestId = 1;
     private readonly GCHandle _selfHandle;
+    // Signalled by the sim whenever SimConnect messages are pending. Passed to
+    // SimConnect_Open as hEventHandle; Dispatch only calls CallDispatch when it
+    // is signaled, because CallDispatch BLOCKS waiting for a message on MSFS —
+    // an empty queue used to freeze the whole control loop for 30 s+.
+    private readonly EventWaitHandle _msgEvent = new(false, EventResetMode.AutoReset);
 
     private SimConnectRecvDelegate? _recvDelegate;
     private int _quitReported;
@@ -77,7 +82,7 @@ public sealed class SimConnectClient : IDisposable
                 if (_connected) return;
                 try
                 {
-                    var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, IntPtr.Zero, 0);
+                    var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, _msgEvent.SafeWaitHandle.DangerousGetHandle(), 0);
                     if (hr != 0 || _handle == IntPtr.Zero)
                         throw new SimConnectException($"SimConnect_Open failed with HRESULT 0x{hr:X8}. Ensure Microsoft Flight Simulator 2024 is running.");
                     _connected = true;
@@ -110,27 +115,41 @@ public sealed class SimConnectClient : IDisposable
         OnDisconnected?.Invoke();
     }
 
+    /// <summary>
+    /// Serialises <see cref="SimConnect_CallDispatch"/> against
+    /// <see cref="DisconnectQuietly"/> only — NOT against sends. Holding the
+    /// send lock while pumping messages let a stalled dispatch freeze every
+    /// SimConnect caller (control loop, ATC, facility loads).
+    /// </summary>
+    private readonly object _dispatchLock = new();
+
     private void DisconnectQuietly()
     {
+        lock (_dispatchLock)
         lock (_lock)
         {
             if (!_connected) return;
             try
             {
-                if (_handle != IntPtr.Zero) SimConnect_Close(ref _handle);
+                if (_handle != IntPtr.Zero) SimConnect_Close(_handle);
             }
             catch { }
             finally
             {
                 _handle = IntPtr.Zero;
                 _connected = false;
-                _stringDefinitions.Clear();
+                lock (_definitionDatums) _stringDefinitions.Clear();
             }
         }
     }
 
     /// <summary>Pumps the SimConnect message queue. Call periodically from the host loop.</summary>
-    public void Dispatch()
+    /// <summary>
+    /// Pumps pending SimConnect messages. With <paramref name="idleWaitMs"/> &gt; 0
+    /// the call sleeps on the message event first — the intended use is a
+    /// dedicated pump thread that blocks until the sim has something to send.
+    /// </summary>
+    public void Dispatch(int idleWaitMs = 0)
     {
         IntPtr handle;
         IntPtr context;
@@ -139,14 +158,56 @@ public sealed class SimConnectClient : IDisposable
             if (_recvDelegate is null || !_connected || _handle == IntPtr.Zero) return;
             handle = _handle;
             context = _selfHandle.IsAllocated ? GCHandle.ToIntPtr(_selfHandle) : IntPtr.Zero;
-            SimConnect_CallDispatch(handle, _recvDelegate, context);
+        }
+        // _dispatchLock keeps Disconnect from closing the handle mid-pump;
+        // _lock stays free so sends from other threads are never blocked by
+        // message processing.
+        lock (_dispatchLock)
+        {
+            lock (_lock)
+            {
+                if (!_connected || _handle != handle) return;
+            }
+            // CallDispatch blocks until a message arrives on MSFS — only call
+            // it while the sim says messages are pending, otherwise an idle
+            // sim (loading, paused, menu) freezes the caller indefinitely.
+            // WaitOne already consumed one signal when idleWaitMs > 0; with
+            // idleWaitMs == 0 we still need a pending-message check first or
+            // CallDispatch would block on an empty queue.
+            if (idleWaitMs > 0 ? !_msgEvent.WaitOne(idleWaitMs) : !_msgEvent.WaitOne(0)) return;
+            var pumps = 0;
+            do
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                long cbBefore = Interlocked.Read(ref _callbackTicks);
+                SimConnect_CallDispatch(handle, _recvDelegate, context);
+                sw.Stop();
+                // A multi-second pump is either the sim not delivering or our
+                // receive callback grinding — the delta tells which.
+                if (sw.ElapsedMilliseconds > 2000)
+                {
+                    var cbMs = TimeSpan.FromTicks(Interlocked.Read(ref _callbackTicks) - cbBefore).TotalMilliseconds;
+                    OnError?.Invoke($"[SimConnect] dispatch pump took {sw.ElapsedMilliseconds} ms (receive callbacks {cbMs:F0} ms)");
+                }
+                pumps++;
+            }
+            while (_msgEvent.WaitOne(0) && pumps < 500);
         }
         if (Interlocked.Exchange(ref _quitReported, 0) == 1) Disconnect();
     }
 
-    private static void OnRecvNative(IntPtr pData, IntPtr cbData, IntPtr pContext)
+    private static long _callbackTicks;
+
+    private static void OnRecvNative(IntPtr pData, uint cbData, IntPtr pContext)
     {
-        if (cbData == IntPtr.Zero || (int)cbData < Marshal.SizeOf<SIMCONNECT_RECV>()) return;
+        var cbSw = System.Diagnostics.Stopwatch.StartNew();
+        try { OnRecvNativeCore(pData, cbData, pContext); }
+        finally { Interlocked.Add(ref _callbackTicks, cbSw.ElapsedTicks); }
+    }
+
+    private static void OnRecvNativeCore(IntPtr pData, uint cbData, IntPtr pContext)
+    {
+        if (cbData < (uint)Marshal.SizeOf<SIMCONNECT_RECV>()) return;
 
         var client = ResolveClient(pContext);
         if (client == null) return;
@@ -174,6 +235,7 @@ public sealed class SimConnectClient : IDisposable
                 }
                 break;
             case SimConnectRecvId.SimObjectData:
+            case SimConnectRecvId.SimObjectDataByType:
                 if (available > SimConnectReceiveOffsets.SimObjectData)
                 {
                     var obj = Marshal.PtrToStructure<SIMCONNECT_RECV_SIMOBJECT_DATA>(pData);
@@ -256,7 +318,10 @@ public sealed class SimConnectClient : IDisposable
     {
         if (dataBytes <= 0) return;
 
-        if (_stringDefinitions.TryGetValue(header.dwDefineID, out var sizes))
+        int[]? sizes;
+        lock (_definitionDatums)
+            _stringDefinitions.TryGetValue(header.dwDefineID, out sizes);
+        if (sizes is not null)
         {
             OnStringDataReceived?.Invoke(new StringSimObjectData(
                 header.dwRequestID, header.dwDefineID, DecodeStrings(dataPtr, dataBytes, sizes)));
@@ -413,8 +478,10 @@ public sealed class SimConnectClient : IDisposable
                 SendNamed($"add string datum '{datums[i].Name}' to definition {defineId}",
                     () => SimConnect_AddToDataDefinition(_handle, defineId, datums[i].Name, "", (uint)datums[i].Size, 0, UnusedDatumId));
             }
+            // Register before any data can arrive so the pump thread never
+            // decodes this definition's payload as doubles.
+            _stringDefinitions[defineId] = sizes;
         }
-        _stringDefinitions[defineId] = sizes;
         return defineId;
     }
 
@@ -440,6 +507,18 @@ public sealed class SimConnectClient : IDisposable
         return results;
     }
 
+    /// <summary>
+    /// Removes a data definition and stops every request still feeding from it.
+    /// SimConnect caps the number of live requests per client, so long sessions
+    /// must release definitions they no longer need.
+    /// </summary>
+    public void ClearDataDefinition(uint defineId)
+    {
+        if (defineId == 0 || _handle == IntPtr.Zero) return;
+        SendNamed($"clear data definition {defineId}", () => SimConnect_ClearDataDefinition(_handle, defineId));
+        lock (_definitionDatums) _stringDefinitions.Remove(defineId);
+    }
+
     public uint RequestData(uint defineId, uint objectId = 0, Period period = Period.Second, uint interval = 0, uint limit = 0)
     {
         string names;
@@ -447,12 +526,12 @@ public sealed class SimConnectClient : IDisposable
         {
             names = _definitionDatums.TryGetValue(defineId, out var list) ? string.Join(", ", list) : "(no datums recorded)";
         }
-        uint requestId = 0;
+        // Allocate the ID up front so a failed send still returns a unique,
+        // harmless request ID instead of 0 (which would collide in callers'
+        // request maps).
+        uint requestId = _nextRequestId++;
         SendNamed($"request data for definition {defineId} [{names}]", () =>
-        {
-            requestId = _nextRequestId++;
-            return SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit);
-        });
+            SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit));
         return requestId;
     }
 
@@ -493,6 +572,11 @@ public sealed class SimConnectClient : IDisposable
         var description = string.IsNullOrEmpty(name)
             ? $"transmit event id {eventId} (data={data})"
             : $"transmit event '{name}' (data={data})";
+        // With GroupIdIsPriority the GroupID parameter is a priority; 0 is below
+        // SIMCONNECT_GROUP_PRIORITY_LOWEST (4e9) and would be ignored. Substitute
+        // the SDK's default priority when no explicit one was given.
+        if ((flags & EventFlags.GroupIdIsPriority) != 0 && groupId == 0)
+            groupId = 2_000_000_000; // SIMCONNECT_GROUP_PRIORITY_DEFAULT
         SendNamed(description, () => SimConnect_TransmitClientEvent(_handle, objectId, eventId, data, groupId, (uint)flags));
     }
 
@@ -570,7 +654,7 @@ public sealed class SimConnectClient : IDisposable
         {
             var eventId = MapClientEventToSimEvent(actionName);
             if (args.Length > 0 && args[0] is double d)
-                TransmitClientEvent(eventId, data: (uint)d);
+                TransmitClientEvent(eventId, data: (uint)Math.Round(d));
             else if (args.Length > 0 && args[0] is uint u)
                 TransmitClientEvent(eventId, data: u);
             else
@@ -589,8 +673,10 @@ public sealed class SimConnectClient : IDisposable
         {
             ptr = Marshal.AllocHGlobal(data.Length);
             Marshal.Copy(data, 0, ptr, data.Length);
+            // cbUnitSize is the size of ONE element, not the whole buffer.
+            var unitSize = arrayCount > 0 ? (uint)(data.Length / arrayCount) : (uint)data.Length;
             SendNamed($"set data on sim object {objectId} (define {defineId})",
-                () => SimConnect_SetDataOnSimObject(_handle, defineId, objectId, 0, arrayCount, (uint)data.Length, ptr));
+                () => SimConnect_SetDataOnSimObject(_handle, defineId, objectId, 0, arrayCount, unitSize, ptr));
         }
         finally
         {
@@ -601,6 +687,8 @@ public sealed class SimConnectClient : IDisposable
     public void Dispose()
     {
         Disconnect();
+        if (NativeBridge.Client == this) NativeBridge.Client = null;
+        _msgEvent.Dispose();
         if (_selfHandle.IsAllocated) _selfHandle.Free();
         GC.SuppressFinalize(this);
     }
@@ -616,7 +704,7 @@ public sealed class SimConnectClient : IDisposable
     private static extern int SimConnect_Open(ref IntPtr phSimConnect, [MarshalAs(UnmanagedType.LPStr)] string szName, IntPtr hWnd, uint dwUserEvent, IntPtr hEvent, uint dwConfigIndex);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
-    private static extern void SimConnect_Close(ref IntPtr phSimConnect);
+    private static extern void SimConnect_Close(IntPtr hSimConnect);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
     private static extern int SimConnect_CallDispatch(IntPtr hSimConnect, SimConnectRecvDelegate pfnDispatch, IntPtr pContext);
@@ -629,6 +717,9 @@ public sealed class SimConnectClient : IDisposable
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
     private static extern int SimConnect_RequestDataOnSimObjectType(IntPtr hSimConnect, uint RequestID, uint DefineID, uint dwRadiusMeters, uint ObjectType);
+
+    [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, SetLastError = true)]
+    private static extern int SimConnect_ClearDataDefinition(IntPtr hSimConnect, uint DefineID);
 
     [DllImport("SimConnect.dll", CallingConvention = CallingConvention.Winapi, CharSet = CharSet.Ansi, SetLastError = true)]
     private static extern int SimConnect_MapClientEventToSimEvent(IntPtr hSimConnect, uint EventID, [MarshalAs(UnmanagedType.LPStr)] string EventName);
@@ -1074,7 +1165,7 @@ internal static class SimConnectReceiveOffsets
     public const int AirportList = 28;
 }
 
-internal delegate void SimConnectRecvDelegate(IntPtr pData, IntPtr cbData, IntPtr pContext);
+internal delegate void SimConnectRecvDelegate(IntPtr pData, uint cbData, IntPtr pContext);
 
 internal static class NativeBridge
 {

@@ -20,6 +20,10 @@ public sealed class ContinuousFlightPlanner
     private readonly Dictionary<string, AirportData> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (double lat, double lon, double altM)> _positions = new(StringComparer.OrdinalIgnoreCase);
     private List<string> _airportIcaos = new();
+    // O(1) dedup for the list feed — a List.Contains scan per item is O(n²)
+    // over ~15k airports and stalls the SimConnect dispatch pump for tens of
+    // seconds while the list arrives in chunks.
+    private readonly HashSet<string> _airportIcaoSet = new(StringComparer.OrdinalIgnoreCase);
     private uint _listRequestId;
     private readonly object _lock = new();
     private readonly TaskCompletionSource<bool> _listReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -34,6 +38,8 @@ public sealed class ContinuousFlightPlanner
     public string? ExcludeIcao { get; set; }
     /// <summary>Operational class of the aircraft — filters destination suitability.</summary>
     public AircraftKind Kind { get; set; } = AircraftKind.Airplane;
+    /// <summary>Optional diagnostic sink for pick progress.</summary>
+    public Action<string>? Logger { get; set; }
 
     public IReadOnlyList<string> KnownAirports { get { lock (_lock) return _airportIcaos.ToList(); } }
 
@@ -64,7 +70,7 @@ public sealed class ContinuousFlightPlanner
         if (requestId != _listRequestId) return;
         lock (_lock)
         {
-            if (!_airportIcaos.Contains(icao, StringComparer.OrdinalIgnoreCase))
+            if (_airportIcaoSet.Add(icao))
                 _airportIcaos.Add(icao);
             _positions[icao] = (lat, lon, altM);
         }
@@ -94,23 +100,35 @@ public sealed class ContinuousFlightPlanner
     /// <summary>Loads an airport's facility data and waits for it (with timeout).</summary>
     public async Task<AirportData?> LoadAirportAsync(string icao, TimeSpan timeout, CancellationToken ct = default)
     {
-        if (_cache.TryGetValue(icao, out var cached)) return cached;
+        AirportData? cached;
+        lock (_lock) _cache.TryGetValue(icao, out cached);
+        if (cached is not null) return cached;
         var tcs = new TaskCompletionSource<AirportData>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void Handler(AirportData a)
+        uint requestId = 0;
+        // Match on the facility request id, not the ICAO string — the payload
+        // ident can differ from (or be missing relative to) the list ident.
+        void Handler(uint id, AirportData a)
         {
-            if (a.Icao.Equals(icao, StringComparison.OrdinalIgnoreCase)) tcs.TrySetResult(a);
+            if (id == requestId) tcs.TrySetResult(a);
         }
-        _loader.OnAirportLoaded += Handler;
+        _loader.OnAirportLoadedForRequest += Handler;
         try
         {
-            _loader.RequestAirport(icao);
+            // Start the timeout BEFORE sending: RequestAirport can block on the
+            // SimConnect send lock, and a stalled send must still time out.
             var delay = Task.Delay(timeout, ct);
+            requestId = _loader.RequestAirport(icao);
             var done = await Task.WhenAny(tcs.Task, delay);
-            return done == tcs.Task ? await tcs.Task : null;
+            if (done != tcs.Task) return null;
+            var airport = await tcs.Task;
+            // Cache under both the requested ident and the payload ident —
+            // they can differ for small strips.
+            lock (_lock) { _cache[icao] = airport; if (!string.IsNullOrEmpty(airport.Icao)) _cache[airport.Icao] = airport; }
+            return airport;
         }
         finally
         {
-            _loader.OnAirportLoaded -= Handler;
+            _loader.OnAirportLoadedForRequest -= Handler;
         }
     }
 
@@ -153,11 +171,15 @@ public sealed class ContinuousFlightPlanner
             inRange.AddRange(candidates.Select(c => (c, -1.0)));
             Log("PickDestination: no coordinates, falling back to blind sampling");
         }
+        Logger?.Invoke($"[Planner] {candidates.Count} airports listed, {inRange.Count} in {MinRangeNm:0}-{range:0}nm band, range cap {range:0}nm.");
 
         var effectiveKind = kind ?? Kind;
         var rng = new Random();
         var shuffled = inRange.OrderBy(_ => rng.Next()).ToList();
         var tried = 0;
+        var loaded = 0;
+        var unsuitable = 0;
+        var outOfBand = 0;
         var deadline = DateTime.UtcNow + timeout;
 
         foreach (var (icao, knownDist) in shuffled)
@@ -168,8 +190,9 @@ public sealed class ContinuousFlightPlanner
             if (_cache.TryGetValue(icao, out var cached))
             {
                 var cd = GeoMath.DistanceNm(lat, lon, cached.ReferenceLatitude, cached.ReferenceLongitude);
-                if (cd < MinRangeNm || cd > range) continue;
+                if (cd < MinRangeNm || cd > range) { outOfBand++; continue; }
                 if (IsSuitable(cached, effectiveKind)) { Log($"PickDestination: selected cached {icao} dist={cd:F1}nm"); return cached; }
+                unsuitable++;
                 continue;
             }
 
@@ -179,30 +202,39 @@ public sealed class ContinuousFlightPlanner
             Log($"PickDestination: loading facility data for {icao} (try #{tried})");
             var airport = await LoadAirportAsync(icao, TimeSpan.FromSeconds(15), ct);
             if (airport is null) continue;
+            loaded++;
             var dist = knownDist >= 0 ? knownDist
                 : GeoMath.DistanceNm(lat, lon, airport.ReferenceLatitude, airport.ReferenceLongitude);
-            if (dist < MinRangeNm || dist > range) continue;
+            if (dist < MinRangeNm || dist > range) { outOfBand++; continue; }
             if (IsSuitable(airport, effectiveKind)) { Log($"PickDestination: selected {icao} dist={dist:F1}nm runway={airport.Runways.Select(r => r.LengthMeters).DefaultIfEmpty(0).Max():F0}m"); return airport; }
+            unsuitable++;
+            if (unsuitable == 1 || unsuitable % 10 == 0)
+                Logger?.Invoke($"[Planner] {icao}: loaded but unsuitable (runways={airport.Runways.Count}, closed={airport.IsClosed}, kind={effectiveKind}).");
         }
         Log($"PickDestination: no suitable airport found after {tried} tries");
+        Logger?.Invoke($"[Planner] No destination: tried {tried} loads ({loaded} ok), {unsuitable} unsuitable, {outOfBand} out-of-band.");
         return null;
     }
 
     /// <summary>ICAO + position of the airport nearest to a point, from the list (no facility load).</summary>
     public (string icao, double lat, double lon, double distNm)? NearestAirport(double lat, double lon)
     {
+        var list = NearestAirports(lat, lon, 1);
+        return list.Count > 0 ? list[0] : null;
+    }
+
+    /// <summary>The <paramref name="count"/> nearest airports to a point, nearest first.</summary>
+    public List<(string icao, double lat, double lon, double distNm)> NearestAirports(double lat, double lon, int count)
+    {
         lock (_lock)
         {
-            string? best = null;
-            double bestDist = double.MaxValue;
-            foreach (var (icao, p) in _positions)
-            {
-                var d = GeoMath.DistanceNm(lat, lon, p.lat, p.lon);
-                if (d < bestDist) { bestDist = d; best = icao; }
-            }
-            if (best is null) return null;
-            var pos = _positions[best];
-            return (best, pos.lat, pos.lon, bestDist);
+            return _positions
+                .Select(kv => (kv.Key, kv.Value.lat, kv.Value.lon,
+                    GeoMath.DistanceNm(lat, lon, kv.Value.lat, kv.Value.lon)))
+                .OrderBy(t => t.Item4)
+                .Take(count)
+                .Select(t => (t.Item1, t.Item2, t.Item3, t.Item4))
+                .ToList();
         }
     }
 
@@ -256,7 +288,7 @@ public sealed class ContinuousFlightPlanner
                 var threshold = rw.ThresholdFor(name);
                 if (threshold is null) continue;
                 // Prefer runways whose landing/takeoff heading has a headwind component.
-                var windAngle = GeoMath.AngleDelta(windDirectionDeg, rw.HeadingDegTrue);
+                var windAngle = GeoMath.AngleDelta(windDirectionDeg, rw.TravelHeadingDeg(name));
                 var score = rw.LengthMeters + waterBonus - Math.Abs(GeoMath.AngleDelta(windAngle, 0)) * 5;
                 if (score > bestScore)
                 {
