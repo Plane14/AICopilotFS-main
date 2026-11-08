@@ -82,9 +82,13 @@ public sealed class HybridAutopilot
     private int? _lastFlap;
     private bool? _lastGear;
 
+    public event Action<string>? OnLog;
+
     private static bool Near(double? a, double b) => a is { } x && Math.Abs(x - b) < 0.5;
 
     public HybridAutopilot(SimConnectClient sc) => _sc = sc;
+
+    private void Log(string msg) => OnLog?.Invoke($"[Autopilot] {msg}");
 
     public ControlTargets Targets => _targets;
     public bool DirectMode => _directMode;
@@ -99,16 +103,18 @@ public sealed class HybridAutopilot
 
     // ---------------- Native autopilot commands ----------------
 
-    public void ApMaster(bool on) => _sc.FireEvent("AP_MASTER", on ? (uint)1 : (uint)0);
+    public void ApMaster(bool on) { _sc.FireEvent("AP_MASTER", on ? (uint)1 : (uint)0); Log($"AP_MASTER={(on ? "ON" : "OFF")}"); }
     public void HeadingHold(double headingDeg)
     {
         _sc.FireEvent("HEADING_BUG_SET", (uint)Math.Round(Geo.GeoMath.NormalizeDeg(headingDeg)));
         _sc.FireEvent("AP_PANEL_HEADING_HOLD");
+        Log($"HEADING_BUG_SET={headingDeg:F0} AP_PANEL_HEADING_HOLD");
     }
     public void AltitudeHold(double altitudeFt)
     {
         _sc.FireEvent("AP_ALT_VAR_SET_ENGLISH", (uint)Math.Clamp(Math.Round(altitudeFt), 0, 60000));
         _sc.FireEvent("AP_PANEL_ALTITUDE_HOLD");
+        Log($"AP_ALT_VAR_SET_ENGLISH={altitudeFt:F0} AP_PANEL_ALTITUDE_HOLD");
     }
     public void VerticalSpeedHold(double vsFpm)
     {
@@ -117,14 +123,16 @@ public sealed class HybridAutopilot
         var raw = (int)Math.Round(clamped * 65536.0 / 1000.0);
         _sc.FireEvent("AP_VS_VAR_SET_ENGLISH", unchecked((uint)raw));
         _sc.FireEvent("AP_PANEL_VS_HOLD");
+        Log($"AP_VS_VAR_SET_ENGLISH={raw} AP_PANEL_VS_HOLD (requested={vsFpm:F0}fpm)");
     }
     public void AirspeedHold(double iasKnots)
     {
         _sc.FireEvent("AP_SPD_VAR_SET", (uint)Math.Clamp(Math.Round(iasKnots), 40, 500));
         _sc.FireEvent("AP_AIRSPEED_HOLD");
+        Log($"AP_SPD_VAR_SET={iasKnots:F1} AP_AIRSPEED_HOLD");
     }
-    public void ApproachHold() => _sc.FireEvent("AP_APR_HOLD");
-    public void NavHold() => _sc.FireEvent("AP_NAV1_HOLD");
+    public void ApproachHold() { _sc.FireEvent("AP_APR_HOLD"); Log("AP_APR_HOLD"); }
+    public void NavHold() { _sc.FireEvent("AP_NAV1_HOLD"); Log("AP_NAV1_HOLD"); }
 
     /// <summary>
     /// Clears the nav/approach latch memory so the next Update re-sends the
@@ -132,27 +140,29 @@ public sealed class HybridAutopilot
     /// (e.g. racetrack) — otherwise the latched flag suppresses re-engaging
     /// NAV/APR and the aircraft never resumes the flight plan.
     /// </summary>
-    public void ResetNavLatches() { _lastNav = false; _lastApr = false; }
-    public void AutoThrottleArm() => _sc.FireEvent("AUTO_THROTTLE_ARM");
+    public void ResetNavLatches() { _lastNav = false; _lastApr = false; Log("ResetNavLatches"); }
+    public void AutoThrottleArm() { _sc.FireEvent("AUTO_THROTTLE_ARM"); Log("AUTO_THROTTLE_ARM"); }
 
     /// <summary>Selects a flap detent by index (0 = up).</summary>
     public void SelectFlaps(int index)
     {
-        if (index <= 0) { _sc.FireEvent("FLAPS_UP"); return; }
-        if (index == 1) { _sc.FireEvent("FLAPS_1"); return; }
-        if (index == 2) { _sc.FireEvent("FLAPS_2"); return; }
-        if (index >= 3) { _sc.FireEvent("FLAPS_3"); return; }
+        if (index <= 0) { _sc.FireEvent("FLAPS_UP"); Log($"SelectFlaps={index} FLAPS_UP"); return; }
+        if (index == 1) { _sc.FireEvent("FLAPS_1"); Log($"SelectFlaps={index} FLAPS_1"); return; }
+        if (index == 2) { _sc.FireEvent("FLAPS_2"); Log($"SelectFlaps={index} FLAPS_2"); return; }
+        if (index >= 3) { _sc.FireEvent("FLAPS_3"); Log($"SelectFlaps={index} FLAPS_3"); return; }
     }
 
     public void Gear(bool down)
     {
         if (down) _sc.FireEvent("GEAR_DOWN"); else _sc.FireEvent("GEAR_UP");
+        Log($"Gear={(down ? "DOWN" : "UP")}");
     }
 
     public void ParkingBrake(bool set)
     {
         // PARKING_BRAKE_SET is a set event; data 1 = set, 0 = release.
         _sc.FireEvent("PARKING_BRAKE_SET", set ? (uint)1 : (uint)0);
+        Log($"PARKING_BRAKE_SET={(set ? 1u : 0u)}");
     }
 
     public void SetThrottleFraction(double fraction)
@@ -218,6 +228,7 @@ public sealed class HybridAutopilot
         }
 
         SendAxes(pitchCmd, bankCmd, rudderCmd, throttle);
+        Log($"DIRECT pitch={pitchCmd:F3} bank={bankCmd:F3} rudder={rudderCmd:F3} throttle={throttle:F3} IAS={s.IndicatedAirspeed:F1}kt alt={s.Altitude:F0}ft hdg={s.TrueHeading:F0}°");
     }
 
     private static double FlightEnvelopeGuardMaxVs(AircraftState s) => 2500;
@@ -254,6 +265,7 @@ public sealed class HybridAutopilot
         _sc.FireEvent("AXIS_AILERONS_SET", neutral);
         _sc.FireEvent("AXIS_RUDDER_SET", neutral);
         _axesNeutralised = true;
+        Log("Neutralize");
     }
 
     /// <summary>Switch between native and direct control, cleaning up the other mode.</summary>
@@ -262,7 +274,7 @@ public sealed class HybridAutopilot
         if (_directMode == direct) return;
         _directMode = direct;
         ResetAll();
-        if (direct) ApMaster(false);
+        if (direct) { ApMaster(false); Log("Direct mode ON"); }
         else
         {
             Neutralize();
@@ -270,6 +282,7 @@ public sealed class HybridAutopilot
             // one-shot events, and without this a second flight never re-engages
             // approach or GPS navigation tracking.
             _lastNav = _lastApr = false;
+            Log("Direct mode OFF");
         }
     }
 }

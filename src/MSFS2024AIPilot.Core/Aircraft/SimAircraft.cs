@@ -32,6 +32,7 @@ public sealed class SimAircraft : IDisposable
     private uint _reqSystems, _reqApModes, _reqCom, _reqAtc, _reqAtcText, _reqWeather, _reqPushback, _reqTitle;
     private uint _atcTextDefineId, _titleDefineId;
     private long _lastNotifiedVersion = -1;
+    private readonly Dictionary<string, DateTime> _lastBlockLog = new();
 
     private const uint RequestAircraftTitle = 90001;
     private const uint EventAircraftLoaded = 90002;
@@ -40,6 +41,7 @@ public sealed class SimAircraft : IDisposable
     public event Action<string>? OnAircraftTitleChanged;
     public event Action<string>? OnAircraftDirectoryChanged;
     public event Action<string>? OnError;
+    public event Action<string>? OnLog;
 
     public SimConnectClient SimConnect => _sc;
     public AircraftState State => GetSnapshot();
@@ -57,16 +59,21 @@ public sealed class SimAircraft : IDisposable
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
+        Log("Connecting to SimConnect...");
         await _sc.ConnectAsync(cancellationToken: ct);
+        Log("SimConnect connected; setting up data definitions.");
         SetupDataDefinitions();
         _sc.SubscribeToSystemEvent(EventAircraftLoaded, "AircraftLoaded");
         _sc.RequestUserAircraftTitle(RequestAircraftTitle);
         _titleDefineId = _sc.CreateStringDataDefinition(("TITLE", DatumType.String256));
         _reqTitle = _sc.RequestData(_titleDefineId, period: Period.Second);
         _requestMap[_reqTitle] = "TITLE";
+        Log($"Data definitions registered: title req={_reqTitle}");
     }
 
     public void Stop() => _sc.Disconnect();
+
+    private void Log(string msg) => OnLog?.Invoke($"[SimAircraft] {msg}");
 
     public void Dispatch()
     {
@@ -317,11 +324,15 @@ public sealed class SimAircraft : IDisposable
             (_reqNavRadio, "NAVRADIO"), (_reqSystems, "SYSTEMS"), (_reqApModes, "APMODES"),
             (_reqCom, "COM"), (_reqAtc, "ATC"), (_reqWeather, "WEATHER"), (_reqPushback, "PUSHBACK"),
         })
+        {
             _requestMap[req] = block;
+            Log($"Request {req} -> {block} block");
+        }
 
         _atcTextDefineId = _sc.CreateStringDataDefinition(AtcTextLayout);
         _reqAtcText = _sc.RequestData(_atcTextDefineId, period: Period.Second);
         _requestMap[_reqAtcText] = "ATCTEXT";
+        Log($"ATC text request {_reqAtcText} -> ATCTEXT");
 
         _sc.OnDataReceived += OnDataReceived;
         _sc.OnStringDataReceived += OnStringDataReceived;
@@ -331,6 +342,7 @@ public sealed class SimAircraft : IDisposable
     private void OnSystemState(SystemStateData data)
     {
         if (data.RequestId != RequestAircraftTitle || string.IsNullOrWhiteSpace(data.String)) return;
+        Log($"AircraftLoaded system state: {data.String}");
         var airPath = data.String;
         var dir = Path.GetDirectoryName(airPath);
         if (string.IsNullOrEmpty(dir)) return;
@@ -355,6 +367,7 @@ public sealed class SimAircraft : IDisposable
                 if (!string.Equals(title, _aircraftTitle, StringComparison.OrdinalIgnoreCase))
                 {
                     _aircraftTitle = title;
+                    Log($"Aircraft title: {_aircraftTitle}");
                     OnAircraftTitleChanged?.Invoke(_aircraftTitle);
                 }
                 if (string.IsNullOrWhiteSpace(_aircraftDirectory))
@@ -363,6 +376,7 @@ public sealed class SimAircraft : IDisposable
                     if (!string.IsNullOrWhiteSpace(dir))
                     {
                         _aircraftDirectory = dir;
+                        Log($"Aircraft directory: {_aircraftDirectory}");
                         OnAircraftDirectoryChanged?.Invoke(_aircraftDirectory);
                     }
                 }
@@ -384,6 +398,7 @@ public sealed class SimAircraft : IDisposable
                 atc.StationType = OrNull(8);
                 atc.NativeStateUtc = DateTime.UtcNow;
                 _state.Timestamp = DateTime.UtcNow;
+                Log($"ATCTEXT ident={atc.AircraftIdent} rwyTO={atc.DesignatedRunwayTakeoff} rwyLD={atc.DesignatedRunwayLanding} gateArr={atc.DesignatedGateArrival} gateDep={atc.DesignatedGateDeparture} nextController={atc.NextControllerName} nextWP={atc.NextWaypointName}");
             }
         }
     }
@@ -440,19 +455,29 @@ public sealed class SimAircraft : IDisposable
 
         lock (_stateLock)
         {
+            var now = DateTime.UtcNow;
+            bool ShouldLog(string b)
+            {
+                if (!_lastBlockLog.TryGetValue(b, out var last)) { _lastBlockLog[b] = now; return true; }
+                if ((now - last).TotalSeconds > 2.0) { _lastBlockLog[b] = now; return true; }
+                return false;
+            }
             switch (block)
             {
                 case "POSITION":
                     _state.Latitude = D(0); _state.Longitude = D(1);
                     _state.Altitude = D(2); _state.AltitudeAGL = D(3);
+                    if (ShouldLog(block)) Log($"POSITION lat={_state.Latitude:F4} lon={_state.Longitude:F4} alt={_state.Altitude:F0}ft AGL={_state.AltitudeAGL:F0}ft");
                     break;
                 case "ATTITUDE":
                     _state.Heading = D(0); _state.TrueHeading = D(1);
                     _state.Pitch = D(2); _state.Bank = D(3);
+                    if (ShouldLog(block)) Log($"ATTITUDE hdg={_state.Heading:F0}° true={_state.TrueHeading:F0}° pitch={_state.Pitch:F1}° bank={_state.Bank:F1}°");
                     break;
                 case "SPEEDS":
                     _state.IndicatedAirspeed = D(0); _state.TrueAirspeed = D(1);
                     _state.Mach = D(2); _state.GroundSpeed = D(3); _state.VerticalSpeed = D(4);
+                    if (ShouldLog(block)) Log($"SPEEDS IAS={_state.IndicatedAirspeed:F1}kt TAS={_state.TrueAirspeed:F1}kt M={_state.Mach:F3} GS={_state.GroundSpeed:F1}kt VS={_state.VerticalSpeed:F0}fpm");
                     break;
                 case "ENGINES":
                 {
@@ -468,6 +493,7 @@ public sealed class SimAircraft : IDisposable
                     }
                     _state.EngineN1 = n1; _state.EngineN2 = n2; _state.EngineFF = ff; _state.EngineThrottle = thr;
                     _state.EnginesRunning = combustion.Any(c => c > 0.5) || n1.Any(n => n > 5);
+                    Log($"ENGINES count={_state.EngineCount} running={_state.EnginesRunning} N1=[{string.Join(",", n1.Select(x => x.ToString("F0")))}] FF=[{string.Join(",", ff.Select(x => x.ToString("F0")))}]");
                     break;
                 }
                 case "ENGINE_LIMITS":
@@ -481,11 +507,13 @@ public sealed class SimAircraft : IDisposable
                         egt[e] = RankineToCelsius(D(b)); rpm[e] = D(b + 1);
                     }
                     _state.EngineEgtC = egt; _state.EngineMaxRpmPct = rpm;
+                    Log($"ENGINE_LIMITS count={count} EgtC=[{string.Join(",", egt.Select(x => x.ToString("F0")))}] MaxRpmPct=[{string.Join(",", rpm.Select(x => x.ToString("F0")))}]");
                     break;
                 }
                 case "FUEL":
                     _state.TotalFuelWeight = D(0); _state.TotalFuelQuantity = D(1);
                     _state.GrossWeight = D(3); _state.CGPercent = D(5);
+                    Log($"FUEL weight={_state.TotalFuelWeight:F0}lb qty={_state.TotalFuelQuantity:F0}gal gross={_state.GrossWeight:F0}lb CG={_state.CGPercent:F1}%");
                     break;
                 case "AUTOPILOT":
                     _state.Autopilot.MasterSwitch = D(0) > 0.5;
@@ -496,11 +524,13 @@ public sealed class SimAircraft : IDisposable
                     _state.Autopilot.VsTarget = D(5);
                     _state.Autopilot.IaTarget = D(6);
                     _state.Autopilot.MachTarget = D(7);
+                    if (ShouldLog(block)) Log($"AUTOPILOT master={_state.Autopilot.MasterSwitch} hdgHold={_state.Autopilot.HeadingHold} hdgTgt={_state.Autopilot.HeadingTarget:F0} altHold={_state.Autopilot.AltitudeHold} altTgt={_state.Autopilot.AltitudeTarget:F0} vsTgt={_state.Autopilot.VsTarget:F0} IASTgt={_state.Autopilot.IaTarget:F1} MachTgt={_state.Autopilot.MachTarget:F3}");
                     break;
                 case "ENVIRONMENT":
                     _state.WindDirection = D(0); _state.WindVelocity = D(1);
                     _state.OAT = D(2); _state.Barometer = D(3);
                     _state.PressureAltitude = D(4); _state.SimTimeSeconds = D(5);
+                    Log($"ENVIRONMENT wind={_state.WindDirection:F0}°/{_state.WindVelocity:F1}kt OAT={_state.OAT:F1}°C baro={_state.Barometer:F2}inHg pressAlt={_state.PressureAltitude:F0}ft");
                     break;
                 case "NAVIGATION":
                     _state.Navigation.DistanceToNextWaypoint = D(0);
@@ -510,6 +540,7 @@ public sealed class SimAircraft : IDisposable
                     _state.Navigation.NextWaypointLongitude = D(5);
                     _state.Navigation.NextWaypointAltitude = D(6);
                     _state.Navigation.CurrentWaypointIndexSet(D(7));
+                    if (ShouldLog(block)) Log($"NAVIGATION wpIdx={_state.Navigation.CurrentWaypointIndex} dist={_state.Navigation.DistanceToNextWaypoint:F1}nm xtrack={_state.Navigation.CrossTrackError:F2}nm brg={_state.Navigation.BearingToNextWaypoint:F0}°");
                     break;
                 case "NAVRADIO":
                     _state.Navigation.LocalizerAvailable = D(0) > 0.5;
@@ -517,6 +548,7 @@ public sealed class SimAircraft : IDisposable
                     _state.Navigation.LocalizerDeviation = D(2);
                     _state.Navigation.GlideSlopeDeviation = D(3);
                     _state.Navigation.NavSignalStrength = D(5);
+                    if (ShouldLog(block)) Log($"NAVRADIO localizer={_state.Navigation.LocalizerAvailable} dev={_state.Navigation.LocalizerDeviation:F2}° glideslope={_state.Navigation.GlideSlopeAvailable} dev={_state.Navigation.GlideSlopeDeviation:F2}° sig={_state.Navigation.NavSignalStrength:F0}");
                     break;
                 case "SYSTEMS":
                     _state.OnGround = D(0) > 0.5;
@@ -530,6 +562,7 @@ public sealed class SimAircraft : IDisposable
                     _state.BarberPoleKt = D(10);
                     _state.MachMaxOperate = D(11);
                     _state.BarberPoleMach = D(12);
+                    if (ShouldLog(block)) Log($"SYSTEMS onGround={_state.OnGround} gearDown={_state.GearDown} gearFloats={_state.GearIsFloats} parkBrake={_state.ParkingBrakeSet} flapsIdx={_state.FlapsHandleIndex} flapsPos={_state.FlapsPosition:F1} stall={_state.StallWarning} overSpeed={_state.OverspeedWarning} barberPole={_state.BarberPoleKt:F1}kt MMO={_state.MachMaxOperate:F3} BarberMach={_state.BarberPoleMach:F3}");
                     break;
                 case "APMODES":
                     _state.Autopilot.FlightDirector = D(0) > 0.5;
@@ -543,6 +576,7 @@ public sealed class SimAircraft : IDisposable
                     _state.Autopilot.LNav = D(8) > 0.5;
                     _state.Autopilot.AutoThrottle = D(9) > 0.5;
                     _state.Autopilot.WingLeveler = D(10) > 0.5;
+                    if (ShouldLog(block)) Log($"APMODES FD={_state.Autopilot.FlightDirector} VS={_state.Autopilot.VsMode} IAS={_state.Autopilot.IaHold} Mach={_state.Autopilot.MachHold} APR={_state.Autopilot.ApproachHold} GS={_state.Autopilot.GlideslopeHold} BC={_state.Autopilot.BackcourseHold} YD={_state.Autopilot.YawDamper} LNAV={_state.Autopilot.LNav} A/T={_state.Autopilot.AutoThrottle} WL={_state.Autopilot.WingLeveler}");
                     break;
                 case "COM":
                     _state.Com1ActiveFrequency = FormatFrequency(D(0));
@@ -550,6 +584,7 @@ public sealed class SimAircraft : IDisposable
                     _state.Com2ActiveFrequency = FormatFrequency(D(2));
                     _state.Com2StandbyFrequency = FormatFrequency(D(3));
                     _state.Squawk = D(4).ToString("0000");
+                    Log($"COM1 active={_state.Com1ActiveFrequency} stby={_state.Com1StandbyFrequency} COM2 active={_state.Com2ActiveFrequency} stby={_state.Com2StandbyFrequency} squawk={_state.Squawk}");
                     break;
                 case "ATC":
                 {
@@ -579,6 +614,7 @@ public sealed class SimAircraft : IDisposable
                     atc.FlightPlanAltitudeDeviationM = D(21);
                     atc.FlightPlanTrackDeviationM = D(22);
                     atc.NativeStateUtc = DateTime.UtcNow;
+                    Log($"ATC clearedIFR={atc.ClearedIfr} clearedTaxi={atc.ClearedTaxi} clearedTO={atc.ClearedTakeoff} clearedLand={atc.ClearedLanding} assignedAlt={atc.AssignedAltitudeFt}ft rwySel={atc.RunwaySelected} rwyLen={atc.RunwayLengthMeters}m twr={atc.AirportIsTowered} onParking={atc.OnParkingSpot}");
                     break;
                 }
                 case "WEATHER":
@@ -590,6 +626,7 @@ public sealed class SimAircraft : IDisposable
                     _state.StructuralDeiceOn = D(5) > 0.5;
                     _state.SurfaceCondition = D(6);
                     _state.SurfaceInfoValid = D(7) > 0.5;
+                    if (ShouldLog(block)) Log($"WEATHER gLoad={_state.GLoad:F2} inCloud={_state.AmbientInCloud} precip={_state.PrecipitationState} ice={_state.StructuralIcePercent:F0}% pitotIce={_state.PitotIcePercent:F0}% deice={_state.StructuralDeiceOn} surface={_state.SurfaceCondition} valid={_state.SurfaceInfoValid}");
                     break;
                 case "PUSHBACK":
                     _state.Pushback.Attached = D(0) > 0.5;
@@ -599,6 +636,7 @@ public sealed class SimAircraft : IDisposable
                         ? (PushbackDirection)(int)Math.Round(D(3))
                         : PushbackDirection.Straight;
                     _state.Pushback.AngleRadians = D(4);
+                    Log($"PUSHBACK attached={_state.Pushback.Attached} available={_state.Pushback.Available} waiting={_state.Pushback.Waiting} dir={_state.Pushback.Direction} angle={_state.Pushback.AngleRadians:F2}rad");
                     break;
             }
             _state.Timestamp = DateTime.UtcNow;

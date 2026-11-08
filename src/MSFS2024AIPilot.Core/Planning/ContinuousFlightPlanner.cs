@@ -46,11 +46,14 @@ public sealed class ContinuousFlightPlanner
         };
     }
 
+    private void Log(string msg) => OnLog?.Invoke($"[ContinuousPlanner] {msg}");
+
+    public event Action<string>? OnLog;
+
     /// <summary>Requests the full airport list from the sim (async; call once after connect).</summary>
     public void RequestAirportList()
     {
-        // The loader owns facility requests; airport list comes through the same client.
-        // Wire the SimConnect events once.
+        Log("Requesting airport list from SimConnect...");
         _loader.SimConnect.OnAirportListItem += OnListItem;
         _loader.SimConnect.OnAirportListEnd += OnListEnd;
         _listRequestId = _loader.RequestAirportList();
@@ -65,12 +68,14 @@ public sealed class ContinuousFlightPlanner
                 _airportIcaos.Add(icao);
             _positions[icao] = (lat, lon, altM);
         }
+        Log($"Airport list item: {icao} at ({lat:F4},{lon:F4}) alt={altM:F0}m (count={_airportIcaos.Count})");
     }
 
     private void OnListEnd(uint requestId)
     {
         if (requestId != _listRequestId) return;
         _listReady.TrySetResult(true);
+        Log($"Airport list complete: {_airportIcaos.Count} airports");
     }
 
     /// <summary>Waits for the airport list to arrive (with timeout).</summary>
@@ -120,6 +125,7 @@ public sealed class ContinuousFlightPlanner
     {
         var range = MaxRangeNm > 0 ? Math.Min(MaxRangeNm, aircraftRangeNm) : aircraftRangeNm;
         if (range <= 0) range = 400;
+        Log($"PickDestination: pos=({lat:F4},{lon:F4}) range={range:F0}nm kind={kind ?? Kind} exclude={ExcludeIcao ?? "(none)"}");
 
         List<string> candidates;
         Dictionary<string, (double lat, double lon, double altM)> positions;
@@ -128,7 +134,7 @@ public sealed class ContinuousFlightPlanner
             candidates = _airportIcaos.ToList();
             positions = new Dictionary<string, (double, double, double)>(_positions, StringComparer.OrdinalIgnoreCase);
         }
-        if (candidates.Count == 0) return null;
+        if (candidates.Count == 0) { Log("PickDestination: no airport candidates"); return null; }
 
         // Position-aware prefilter: the airport list carries coordinates, so we
         // only load facility data for airports actually inside the range band.
@@ -140,10 +146,12 @@ public sealed class ContinuousFlightPlanner
             if (d >= MinRangeNm && d <= range)
                 inRange.Add((icao, d));
         }
+        Log($"PickDestination: {candidates.Count} total airports, {inRange.Count} within range [{MinRangeNm:F0}-{range:F0}]nm");
         if (inRange.Count == 0)
         {
             // No coordinates received (older sim): fall back to blind sampling.
             inRange.AddRange(candidates.Select(c => (c, -1.0)));
+            Log("PickDestination: no coordinates, falling back to blind sampling");
         }
 
         var effectiveKind = kind ?? Kind;
@@ -154,27 +162,29 @@ public sealed class ContinuousFlightPlanner
 
         foreach (var (icao, knownDist) in shuffled)
         {
-            if (ct.IsCancellationRequested) return null;
-            if (DateTime.UtcNow > deadline) break;
+            if (ct.IsCancellationRequested) { Log("PickDestination: cancelled"); return null; }
+            if (DateTime.UtcNow > deadline) { Log($"PickDestination: deadline reached after {tried} tries"); break; }
             if (!string.IsNullOrEmpty(ExcludeIcao) && icao.Equals(ExcludeIcao, StringComparison.OrdinalIgnoreCase)) continue;
             if (_cache.TryGetValue(icao, out var cached))
             {
                 var cd = GeoMath.DistanceNm(lat, lon, cached.ReferenceLatitude, cached.ReferenceLongitude);
                 if (cd < MinRangeNm || cd > range) continue;
-                if (IsSuitable(cached, effectiveKind)) return cached;
+                if (IsSuitable(cached, effectiveKind)) { Log($"PickDestination: selected cached {icao} dist={cd:F1}nm"); return cached; }
                 continue;
             }
 
             tried++;
             // Cap facility loads per pick to stay responsive.
-            if (tried > 60) break;
+            if (tried > 60) { Log($"PickDestination: max tries (60) reached"); break; }
+            Log($"PickDestination: loading facility data for {icao} (try #{tried})");
             var airport = await LoadAirportAsync(icao, TimeSpan.FromSeconds(15), ct);
             if (airport is null) continue;
             var dist = knownDist >= 0 ? knownDist
                 : GeoMath.DistanceNm(lat, lon, airport.ReferenceLatitude, airport.ReferenceLongitude);
             if (dist < MinRangeNm || dist > range) continue;
-            if (IsSuitable(airport, effectiveKind)) return airport;
+            if (IsSuitable(airport, effectiveKind)) { Log($"PickDestination: selected {icao} dist={dist:F1}nm runway={airport.Runways.Select(r => r.LengthMeters).DefaultIfEmpty(0).Max():F0}m"); return airport; }
         }
+        Log($"PickDestination: no suitable airport found after {tried} tries");
         return null;
     }
 

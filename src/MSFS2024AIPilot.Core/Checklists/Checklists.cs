@@ -52,13 +52,18 @@ public sealed class ChecklistManager
     private readonly string? _aircraftDir;
 
     public event Action<Checklist?>? OnChecklistChanged;
+    public event Action<string>? OnLog;
 
     public ChecklistManager(string? aircraftDir = null)
     {
         _aircraftDir = aircraftDir;
+        Log("ChecklistManager initialized");
         LoadFromAircraft();
         EnsureGenericFallbacks();
+        OnChecklistChanged?.Invoke(Current);
     }
+
+    private void Log(string msg) => OnLog?.Invoke($"[Checklists] {msg}");
 
     public ChecklistPhase CurrentPhase => _currentPhase;
     public Checklist? Current => _checklists.TryGetValue(_currentPhase, out var c) ? c : null;
@@ -67,6 +72,7 @@ public sealed class ChecklistManager
     {
         if (_currentPhase == phase) return;
         _currentPhase = phase;
+        Log($"Phase changed -> {phase}");
         OnChecklistChanged?.Invoke(Current);
     }
 
@@ -78,6 +84,7 @@ public sealed class ChecklistManager
         if (c.CurrentIndex < c.Items.Count)
             c.Items[c.CurrentIndex].Done = true;
         c.CurrentIndex++;
+        Log($"Checklist '{c.Title}' advanced to item {c.CurrentIndex}/{c.Items.Count}");
         OnChecklistChanged?.Invoke(c);
     }
 
@@ -89,6 +96,7 @@ public sealed class ChecklistManager
             c.CurrentIndex = 0;
         }
         if (phase is { } p) _currentPhase = p;
+        Log($"Checklists reset{(phase.HasValue ? $" phase={phase}" : "")}");
         OnChecklistChanged?.Invoke(Current);
     }
 
@@ -98,6 +106,7 @@ public sealed class ChecklistManager
         _checklists.Clear();
         if (!string.IsNullOrEmpty(aircraftDir)) LoadFromAircraft(aircraftDir);
         EnsureGenericFallbacks();
+        Log($"Checklists reloaded for dir={aircraftDir}, phases={_checklists.Count}");
         OnChecklistChanged?.Invoke(Current);
     }
 
@@ -105,20 +114,26 @@ public sealed class ChecklistManager
     {
         dir ??= _aircraftDir;
         if (string.IsNullOrEmpty(dir)) return;
+        int fileCount = 0;
         foreach (var file in Directory.EnumerateFiles(dir, "*.xml", SearchOption.AllDirectories))
         {
+            fileCount++;
             try
             {
                 var doc = XDocument.Load(file);
                 var simBase = doc.Root;
                 if (simBase?.Attribute("Type")?.Value != "SimBase.Document") continue;
+                int checklistCount = 0;
                 foreach (var desc in simBase.Descendants("Checklist"))
                 {
                     ParseChecklistXml(desc);
+                    checklistCount++;
                 }
+                if (checklistCount > 0) Log($"Loaded {checklistCount} checklists from {file}");
             }
             catch { }
         }
+        Log($"Scanned {fileCount} XML files in {dir}");
     }
 
     private void ParseChecklistXml(XElement desc)
@@ -128,6 +143,7 @@ public sealed class ChecklistManager
         var phase = InferPhase(title);
         var checklist = GetOrCreate(phase);
         checklist.Title = title;
+        var itemCount = 0;
         foreach (var item in desc.Descendants("ChecklistItem"))
         {
             var text = item.Element("Text")?.Value ?? item.Element("Name")?.Value ?? "";
@@ -139,7 +155,9 @@ public sealed class ChecklistManager
                 SimVar = item.Element("SimVar")?.Value,
                 ExpectedValue = double.TryParse(item.Element("Value")?.Value, out var v) ? v : 0,
             });
+            itemCount++;
         }
+        Log($"Checklist '{title}' ({phase}) parsed with {itemCount} items");
     }
 
     private static ChecklistPhase InferPhase(string title)
