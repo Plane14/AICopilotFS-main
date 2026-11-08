@@ -528,6 +528,8 @@ public sealed class SimAircraft : IDisposable
                     _state.StallWarning = D(8) > 0.5;
                     _state.OverspeedWarning = D(9) > 0.5;
                     _state.BarberPoleKt = D(10);
+                    _state.MachMaxOperate = D(11);
+                    _state.BarberPoleMach = D(12);
                     break;
                 case "APMODES":
                     _state.Autopilot.FlightDirector = D(0) > 0.5;

@@ -39,4 +39,53 @@ public class GuidanceTests
         Assert.Equal("GEAR_UP", ChecklistBindings.EventFor("Gear up"));
         Assert.Equal("BRAKE PARKING POSITION", ChecklistBindings.SimVarFor("Parking brake set"));
     }
+
+    [Fact]
+    public void Precip_state_mask_ignores_none()
+    {
+        // AMBIENT PRECIP STATE mask: 2 = None, 4 = Rain, 8 = Snow.
+        // None must NOT count as precipitation for icing.
+        Assert.False(WeatherModel.IcingConditions(-5, false, 2, 0));   // None, cold, no ice
+        Assert.True(WeatherModel.IcingConditions(-5, false, 4, 0));    // Rain, cold
+        Assert.True(WeatherModel.IcingConditions(-5, false, 8, 0));    // Snow, cold
+        Assert.True(WeatherModel.IcingConditions(-5, false, 12, 0));   // Rain + Snow
+        Assert.False(WeatherModel.IcingConditions(15, false, 4, 0));   // Rain but too warm
+        Assert.False(WeatherModel.IcingConditions(-5, false, 0, 0));   // No precip, not in cloud
+        Assert.True(WeatherModel.IcingConditions(-5, true, 0, 0));     // In cloud, cold
+    }
+
+    [Fact]
+    public void Aircraft_state_mach_limit_uses_mach_max_operate()
+    {
+        var s = new AircraftState
+        {
+            BarberPoleKt = 0,        // no barber pole, MMO is the limit
+            MachMaxOperate = 0.78,   // ~516 kt at sea level
+            BarberPoleMach = 0,
+        };
+        // MaxAirspeedLimitKt should be MMO in kt (~516)
+        var limit = s.MaxAirspeedLimitKt;
+        Assert.InRange(limit, 500, 530);
+
+        // Mach limit via OperatingLimits.ConfigurationSpeedLimitKt
+        var limits = new OperatingLimits
+        {
+            MaxAirspeedKt = 600,
+            MaxMach = 0.78,
+        };
+        var clamped = FlightEnvelope.ClampAirspeed(400, limits, s);
+        Assert.True(clamped <= 530); // clamped by MMO ~516 kt
+    }
+
+    [Fact]
+    public void Aircraft_state_barber_pole_mach_limit()
+    {
+        var s = new AircraftState
+        {
+            BarberPoleKt = 0,
+            MachMaxOperate = 0,
+            BarberPoleMach = 0.82,
+        };
+        Assert.InRange(s.MaxMachLimit, 0.81, 0.83);
+    }
 }

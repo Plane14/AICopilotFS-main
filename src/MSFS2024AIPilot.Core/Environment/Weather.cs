@@ -82,10 +82,15 @@ public static class WeatherModel
     }
 
     /// <summary>Visible moisture in the icing temperature band, or ice already on the airframe.</summary>
+    /// <remarks>
+    /// <c>AMBIENT PRECIP STATE</c> is a bit mask: 2 = None, 4 = Rain, 8 = Snow.
+    /// Only Rain (4) or Snow (8) count as precipitation; None (2) does not.
+    /// </remarks>
     public static bool IcingConditions(double oatC, bool inCloud, double precipState, double structuralIcePercent)
     {
         if (structuralIcePercent > IcePerceptionThreshold) return true;
-        var moist = inCloud || precipState != 0;
+        var precipMasked = (int)precipState & 12; // 4 = Rain, 8 = Snow; 2 = None is ignored
+        var moist = inCloud || precipMasked != 0;
         return moist && oatC <= IcingUpperTempC && oatC >= IcingLowerTempC;
     }
 

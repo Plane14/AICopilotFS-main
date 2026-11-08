@@ -350,7 +350,8 @@ public sealed class PilotEngine : IDisposable
         }
 
         // Feed weather/turbulence into envelope limits.
-        _limits.MaxAirspeedKt = s.BarberPoleKt > 0 ? s.BarberPoleKt : 0;
+        _limits.MaxAirspeedKt = s.MaxAirspeedLimitKt > 0 ? s.MaxAirspeedLimitKt : (s.BarberPoleKt > 0 ? s.BarberPoleKt : 0);
+        _limits.MaxMach = s.MaxMachLimit > 0 ? s.MaxMachLimit : 0;
         _limits.MinAirspeedKt = s.StallWarning ? s.IndicatedAirspeed * 0.9 : VsEstimate(s);
 
         PilotStatus st;

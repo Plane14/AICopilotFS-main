@@ -61,7 +61,10 @@ public sealed class AirportFacilityLoader : IDisposable
         F("PRIMARY_CLOSED"); F("SECONDARY_CLOSED");
         F("PRIMARY_TAKEOFF"); F("PRIMARY_LANDING");
         F("SECONDARY_TAKEOFF"); F("SECONDARY_LANDING");
-        F("PRIMARY_THRESHOLD"); F("SECONDARY_THRESHOLD");
+        // PRIMARY_THRESHOLD / SECONDARY_THRESHOLD are PAVEMENT structs that the
+        // MSFS 2024 SimConnect facility API rejects when added to a definition
+        // (they return SimConnect exceptions). Threshold positions are derived
+        // from runway geometry (centre ± length/2 along heading) instead.
         F("CLOSE RUNWAY");
 
         // TAXI_NAME
@@ -209,8 +212,9 @@ public sealed class AirportFacilityLoader : IDisposable
             SecondaryTakeoff = r.ReadInt8() != 0,
             SecondaryLanding = r.ReadInt8() != 0,
         };
-        if (r.ReadInt8() != 0) rw.PrimaryThreshold = rw.PrimaryEnd;
-        if (r.ReadInt8() != 0) rw.SecondaryThreshold = rw.SecondaryEnd;
+        // PRIMARY_THRESHOLD / SECONDARY_THRESHOLD are rejected fields and are
+        // not present in the payload. Threshold positions are derived from
+        // runway geometry (PrimaryEnd / SecondaryEnd) in RunwayInfo.
         req.Airport.Runways.Add(rw);
     }
 
