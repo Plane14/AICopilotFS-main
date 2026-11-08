@@ -96,6 +96,7 @@ public sealed class PilotEngine : IDisposable
     private PilotStatus _status = new();
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
+    private bool _reconnecting;
 
     // Mission state
     private BuiltRoute? _route;
@@ -147,6 +148,49 @@ public sealed class PilotEngine : IDisposable
         _ap.OnLog += msg => Log(msg);
         _checklists.OnLog += Log;
         _checklists.OnItemDone += (_, status) => PublishStatusThrottled();
+        _aircraft.SimConnect.OnSystemState += OnSimSystemState;
+        _aircraft.SimConnect.OnDisconnected += OnSimDisconnected;
+    }
+
+    private const uint RequestSimFlightPlan = 91001;
+    private TaskCompletionSource<string?>? _simPlanTcs;
+
+    private void OnSimSystemState(SystemStateData data)
+    {
+        if (data.RequestId == RequestSimFlightPlan)
+            _simPlanTcs?.TrySetResult(string.IsNullOrWhiteSpace(data.String) ? null : data.String);
+    }
+
+    /// <summary>
+    /// SimConnect dropped (sim restarted, connection lost, ...). Attempt to
+    /// reconnect automatically so a mid-flight hiccup doesn't strand the pilot.
+    /// Re-connection re-runs <see cref="ConnectAsync"/>, which re-registers
+    /// data definitions and restarts the control loop.
+    /// </summary>
+    private async void OnSimDisconnected()
+    {
+        if (_reconnecting || _loopCts is null) return;
+        _reconnecting = true;
+        try
+        {
+            while (!_loopCts.Token.IsCancellationRequested)
+            {
+                try { await Task.Delay(5000, _loopCts.Token); } catch { return; }
+                Log("[Pilot] SimConnect disconnected — attempting auto-reconnect...");
+                try
+                {
+                    await ConnectAsync();
+                    Log("[Pilot] Auto-reconnected to SimConnect.");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Log($"[Pilot] Auto-reconnect failed: {ex.Message}; retrying in 5s.");
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally { _reconnecting = false; }
     }
 
     public PilotStatus Status { get { lock (_lock) return _status; } }
@@ -172,11 +216,39 @@ public sealed class PilotEngine : IDisposable
     public async Task<bool> LoadFlightPlanAsync(string plnPath, CancellationToken ct = default)
     {
         var (wps, nav) = PlnFile.Parse(plnPath);
-        if (wps.Count == 0) { Log("[Pilot] Flight plan file has no waypoints."); return false; }
+        // Plans with no enroute waypoints are still valid when they name both
+        // airports — the sim's own CUSTOMFLIGHT.PLN is exactly that shape.
+        var airportPair = wps.Count == 0 &&
+            (!string.IsNullOrEmpty(nav.DepartureIcao) || !string.IsNullOrEmpty(nav.ArrivalIcao));
+        if (wps.Count == 0 && !airportPair) { Log("[Pilot] Flight plan file has no waypoints."); return false; }
         // Shares the route-planning gate with continuous/manual planning.
         if (Interlocked.Exchange(ref _routePlanning, 1) == 1) return false;
         try { return await LoadFlightPlanCoreAsync(plnPath, wps, nav, ct); }
         finally { Interlocked.Exchange(ref _routePlanning, 0); }
+    }
+
+    /// <summary>
+    /// Loads the flight plan currently active in the simulator: the sim reports
+    /// its plan file through the "FlightPlan" system state, and the .pln it
+    /// points at is parsed like any other plan.
+    /// </summary>
+    public async Task<bool> LoadSimFlightPlanAsync(CancellationToken ct = default)
+    {
+        var sc = _aircraft.SimConnect;
+        if (!sc.IsConnected) { Log("[Pilot] Not connected to the simulator."); return false; }
+        _simPlanTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try { sc.RequestSystemState(RequestSimFlightPlan, "FlightPlan"); }
+        catch (Exception ex) { Log($"[Pilot] FlightPlan system-state request failed: {ex.Message}"); return false; }
+        string? path;
+        try { path = await _simPlanTcs.Task.WaitAsync(TimeSpan.FromSeconds(10), ct); }
+        catch (TimeoutException) { Log("[Pilot] Sim did not report its flight plan."); return false; }
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            Log($"[Pilot] Sim reports no readable flight plan ({path ?? "empty"}).");
+            return false;
+        }
+        Log($"[Pilot] Sim flight plan: {path}");
+        return await LoadFlightPlanAsync(path, ct);
     }
 
     private async Task<bool> LoadFlightPlanCoreAsync(string plnPath, List<FlightPlanWaypoint> wps, NavigationState nav, CancellationToken ct)
@@ -184,6 +256,32 @@ public sealed class PilotEngine : IDisposable
         var s = _aircraft.GetSnapshot();
         _routeNav = nav;
         _routeNav.Waypoints = wps;
+
+        if (wps.Count == 0)
+        {
+            // Airport-pair plan: resolve both ends and let the route builder
+            // generate departure → enroute → approach waypoints itself.
+            _departureAirport = !string.IsNullOrEmpty(nav.DepartureIcao)
+                ? await _planner.LoadAirportAsync(nav.DepartureIcao, TimeSpan.FromSeconds(20), ct)
+                : await FindNearestAirportAsync(s, ct);
+            _destinationAirport = !string.IsNullOrEmpty(nav.ArrivalIcao)
+                ? await _planner.LoadAirportAsync(nav.ArrivalIcao, TimeSpan.FromSeconds(20), ct)
+                : null;
+            if (_departureAirport is null || _destinationAirport is null)
+            { Log("[Pilot] Could not resolve the flight plan's airports."); return false; }
+            // The sim's plan file persists between sessions — refuse a plan
+            // whose departure is nowhere near the aircraft.
+            var depDistNm = GeoMath.DistanceNm(s.Latitude, s.Longitude,
+                _departureAirport.ReferenceLatitude, _departureAirport.ReferenceLongitude);
+            if (s.HasPosition && depDistNm > 30)
+            {
+                Log($"[Pilot] Plan departs {_departureAirport.Icao} ({depDistNm:F0} nm away) — stale plan ignored.");
+                return false;
+            }
+            _departureRunwayName = nav.DepartureRunway;
+            _arrivalRunwayName = nav.ArrivalRunway;
+            return await BuildAndLoadRouteAsync(s, ct);
+        }
 
         _departureAirport = !string.IsNullOrEmpty(nav.DepartureIcao)
             ? await _planner.LoadAirportAsync(nav.DepartureIcao, TimeSpan.FromSeconds(20), ct)
@@ -222,6 +320,11 @@ public sealed class PilotEngine : IDisposable
             _route.FinalApproachFix = positioned.Count > 1 ? positioned[^2] : positioned[^1];
         }
 
+        // Push the plan into the sim's own GPS too — without this the aircraft's
+        // FMS stays empty and the sim shows no flight plan for the leg.
+        try { _aircraft.SimConnect.FlightPlanLoad(plnPath); }
+        catch (Exception ex) { Log($"[Pilot] FlightPlanLoad failed: {ex.Message}"); }
+
         lock (_lock)
         {
             _status.DepartureIcao = nav.DepartureIcao ?? _departureAirport?.Icao ?? "";
@@ -242,6 +345,14 @@ public sealed class PilotEngine : IDisposable
     /// </summary>
     private async Task<AirportData?> FindNearestAirportAsync(AircraftState s, CancellationToken ct)
     {
+        // Engage can fire before the first POSITION frame lands; a 0,0 snapshot
+        // resolves "nearest airport" to Null Island and poisons the whole flight.
+        for (int i = 0; i < 150 && !s.HasPosition; i++)
+        {
+            await Task.Delay(100, ct);
+            s = _aircraft.GetSnapshot();
+        }
+        if (!s.HasPosition) { Log("[Pilot] No position data from the sim; cannot resolve departure airport."); return null; }
         if (!await _planner.WaitForAirportListAsync(TimeSpan.FromSeconds(30), ct)) return null;
         var candidates = _planner.NearestAirports(s.Latitude, s.Longitude, 8);
         if (candidates.Count == 0) return null;
@@ -271,6 +382,34 @@ public sealed class PilotEngine : IDisposable
 
         if (mode == PilotMode.Continuous)
             _ = Task.Run(() => EnsureContinuousDepartureAsync());
+        else if (mode == PilotMode.SingleFlight && _route is null)
+            _ = Task.Run(() => EnsureSingleLegAsync());
+    }
+
+    /// <summary>
+    /// Single-flight leg with no .pln loaded: depart the airport the aircraft
+    /// is at and pick one suitable destination in range — the same planner
+    /// continuous mode uses, but it stops after the one leg.
+    /// </summary>
+    private async Task EnsureSingleLegAsync()
+    {
+        try
+        {
+            if (_departureAirport is not null && _route is not null) return;
+            var s = _aircraft.GetSnapshot();
+            _departureAirport ??= await FindNearestAirportAsync(s, CancellationToken.None);
+            if (_departureAirport is null) { Log("[Pilot] Could not identify the departure airport."); return; }
+            if (_route is null)
+            {
+                // Prefer the plan the user loaded in the sim; fall back to a
+                // random in-range destination when there isn't one.
+                if (!await LoadSimFlightPlanAsync(CancellationToken.None) || _route is null)
+                    await TryPlanNextLegAsync(CancellationToken.None);
+                if (_route is null) { Log("[Pilot] No destination found in range for the single flight."); return; }
+            }
+            if (_route is not null) SetPhase(FlightPhase.Preflight);
+        }
+        catch (Exception ex) { Log($"[Pilot] Single-flight planning failed: {ex.Message}"); }
     }
 
     /// <summary>
@@ -547,7 +686,10 @@ public sealed class PilotEngine : IDisposable
         switch (phase)
         {
             case FlightPhase.Unknown:
-                if (s.EnginesRunning || s.OnGround) SetPhase(FlightPhase.Preflight);
+                // Gate on real position data, not OnGround: before the first
+                // POSITION frame arrives the snapshot reads 0,0/false and the
+                // machine would sit in Unknown forever (engines never start).
+                if (s.HasPosition || s.EnginesRunning) SetPhase(FlightPhase.Preflight);
                 break;
 
             case FlightPhase.Preflight:
@@ -763,6 +905,9 @@ public sealed class PilotEngine : IDisposable
     private void ExecutePreflight(AircraftState s, ControlTargets t)
     {
         _ap.SetDirectMode(true);
+        // Parked with the brake set: hold the throttle at idle. Leaving it
+        // unset makes the direct-mode fallback command ~45% the whole time.
+        t.ThrottleFraction = 0;
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
         // Wait for the gate checklists (pushback + gate), then advance.
         var gateDone = _checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE);
@@ -773,6 +918,7 @@ public sealed class PilotEngine : IDisposable
 
     private DateTime _starterAttemptUtc = DateTime.MinValue;
     private int _starterAttempts;
+    private DateTime _lastStartFailLogUtc = DateTime.MinValue;
     private bool _turbineStartersHeld;
 
     /// <summary>
@@ -801,6 +947,9 @@ public sealed class PilotEngine : IDisposable
     private void ExecuteStartup(AircraftState s, ControlTargets t, DateTime now)
     {
         _ap.SetDirectMode(true);
+        // Cranking uses ~15% (matching the start sequence below); once the
+        // engines are lighted the throttle returns to idle for taxi.
+        t.ThrottleFraction = s.EnginesRunning ? 0 : 0.15;
         if (!s.ParkingBrakeSet) _ap.ParkingBrake(true);
         if (!_checklists.IsLoaded ||
             (_checklists.StepComplete(ChecklistStep.PREFLIGHT_GATE) &&
@@ -850,9 +999,16 @@ public sealed class PilotEngine : IDisposable
                 if (_starterAttempts >= 8)
                 {
                     ReleaseHeldStarters(s);
-                    Log("[Pilot] WARNING: engines did not start after repeated attempts; continuing anyway.");
-                    SetPhase(FlightPhase.TaxiOut);
-                    BeginTaxiOut(s);
+                    // Do NOT proceed to taxi with dead engines — the aircraft
+                    // cannot move without power. Keep retrying engine start
+                    // indefinitely instead of giving up and stranding the flight.
+                    if (now - _lastStartFailLogUtc > TimeSpan.FromSeconds(30))
+                    {
+                        _lastStartFailLogUtc = now;
+                        Log("[Pilot] WARNING: engines still not running after repeated start attempts; continuing to retry.");
+                    }
+                    _starterAttemptUtc = now;
+                    _starterAttempts = 0;
                 }
                 return;
             }
@@ -919,7 +1075,14 @@ public sealed class PilotEngine : IDisposable
 
         // Build the taxi route to the hold-short for that runway.
         var start = TaxiRouter.FindNearestNode(_departureAirport, s.Latitude, s.Longitude);
-        if (start is null) { Log("[Pilot] No ground graph at departure airport; cannot taxi."); return; }
+        if (start is null)
+        {
+            var nearestM = _departureAirport.Nodes.Values
+                .Select(n => GeoMath.DistanceMeters(s.Latitude, s.Longitude, n.Latitude, n.Longitude))
+                .DefaultIfEmpty(-1).Min();
+            Log($"[Pilot] No ground graph node within 500 m of the aircraft (nearest {nearestM:F0} m); cannot taxi.");
+            return;
+        }
         var holdShorts = TaxiRouter.HoldShortsFor(_departureAirport, name);
         if (holdShorts.Count == 0)
         {
@@ -1023,6 +1186,10 @@ public sealed class PilotEngine : IDisposable
         }
         _pushbackDone = true;
 
+        // Release the parking brake so the aircraft can actually taxi — it was
+        // set during Startup and never cleared for the non-pushback path.
+        if (s.ParkingBrakeSet) _ap.ParkingBrake(false);
+
         // Wait for taxi clearance if the airport is towered. Re-request every
         // 60 s while still pending — a timed-out or denied request must not
         // leave the aircraft waiting forever.
@@ -1033,7 +1200,33 @@ public sealed class PilotEngine : IDisposable
         }
 
         // Route to the runway and taxi.
-        if (_taxiRoute is null) { PlanDeparture(s); if (_taxiRoute is null) return; }
+        if (_taxiRoute is null)
+        {
+            PlanDeparture(s);
+            if (_taxiRoute is null)
+            {
+                // No taxi route available — if the aircraft is already on or
+                // very near the departure runway threshold, skip taxi and go
+                // straight to line-up/takeoff (subject to takeoff clearance).
+                if (_departureAirport is not null && _departureRunwayName is not null &&
+                    (!s.Atc.DepartureAirportIsTowered || s.Atc.ClearedTakeoff))
+                {
+                    var rw = _departureAirport.FindRunway(_departureRunwayName);
+                    var threshold = rw?.ThresholdFor(_departureRunwayName);
+                    if (threshold is not null)
+                    {
+                        var distToThreshold = GeoMath.DistanceMeters(s.Latitude, s.Longitude, threshold.Value.lat, threshold.Value.lon);
+                        if (distToThreshold < 100)
+                        {
+                            Log("[Pilot] No taxi route but aircraft is on/near the runway — proceeding to line-up.");
+                            LineUpAndTakeoff(s, t);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
+        }
 
         var legs = _taxiRoute.Legs;
         if (_taxiLegIndex >= legs.Count)

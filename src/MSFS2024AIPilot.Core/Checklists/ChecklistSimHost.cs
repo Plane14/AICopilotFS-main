@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using MSFS2024AIPilot.Core.SimConnect;
 
@@ -15,9 +16,14 @@ namespace MSFS2024AIPilot.Core;
 public sealed class ChecklistSimHost : IChecklistHost, IDisposable
 {
     private readonly SimConnectClient _sc;
-    private readonly Dictionary<string, SimVarFeed> _feeds = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<uint, SimVarFeed> _byRequest = new();
+    // _feeds and _byRequest are ConcurrentDictionary so the dispatch callback
+    // (which runs under SimConnectClient._nativeLock) can read them without
+    // taking this host's lock — that would deadlock against Subscribe, which
+    // takes this lock and then calls SimConnect (_sc._nativeLock).
+    private readonly ConcurrentDictionary<string, SimVarFeed> _feeds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<uint, SimVarFeed> _byRequest = new();
     private readonly Dictionary<uint, Subscription> _subscriptions = new();
+    private readonly object _subLock = new();
     private uint _nextHandle = 1;
     private bool _disposed;
 
@@ -35,7 +41,7 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
     {
         public uint Handle;
         public string[] Names = Array.Empty<string>();
-        public double[] Values = Array.Empty<double>();
+        public double[] Values = new double[0];
         public Action<double[]>? Callback;
         public readonly List<SimVarFeed> Feeds = new();
         public bool Active = true;
@@ -93,39 +99,51 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
 
     public uint Subscribe(string[] names, string[] units, Action<double[]> onData)
     {
+        uint handle;
+        lock (_subLock) { handle = _nextHandle++; }
+
         var sub = new Subscription
         {
-            Handle = _nextHandle,
+            Handle = handle,
             Names = names,
             Values = new double[names.Length],
             Callback = onData
         };
-        _subscriptions[sub.Handle] = sub;
+        lock (_subLock) { _subscriptions[handle] = sub; }
 
         for (int i = 0; i < names.Length; i++)
         {
             var key = names[i];
-            if (!_feeds.TryGetValue(key, out var feed))
+            SimVarFeed feed;
+            if (!_feeds.TryGetValue(key, out var existing))
             {
                 feed = new SimVarFeed { Name = names[i], Units = units[i] };
                 if (_sc.IsConnected) StartFeed(feed);
                 _feeds[key] = feed;
             }
+            else
+            {
+                feed = existing;
+            }
             feed.Owner = sub;
             sub.Feeds.Add(feed);
         }
-        return _nextHandle++;
+        return handle;
     }
 
     /// <summary>
-    /// Releases a subscription's feeds. The handle was advisory before and the subscription
-    /// was ignored, so a feed stayed live for the session: SimConnect allows only a limited
-    /// number of outstanding requests per client, and the flight would eventually be
-    /// refused its own simvar requests.
+    /// Releases a subscription's feeds. Without this the feed stayed live for
+    /// the session: SimConnect caps the number of live requests per client, and
+    /// the flight would eventually be refused its own simvar requests.
     /// </summary>
     public void Unsubscribe(uint handle)
     {
-        if (!_subscriptions.Remove(handle, out var sub)) return;
+        Subscription? sub;
+        lock (_subLock)
+        {
+            if (!_subscriptions.Remove(handle, out var found)) return;
+            sub = found;
+        }
 
         sub.Active = false;
         sub.Callback = null;
@@ -133,13 +151,19 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
         {
             if (!ReferenceEquals(feed.Owner, sub)) continue;
             feed.Owner = null;
-            if (!_subscriptions.Values.Any(s => s.Feeds.Contains(feed)))
+
+            bool stillOwned;
+            lock (_subLock)
             {
-                _feeds.Remove(feed.Name);
+                stillOwned = _subscriptions.Values.Any(s => s.Feeds.Contains(feed));
+            }
+            if (!stillOwned)
+            {
+                _feeds.TryRemove(feed.Name, out _);
                 // ClearDataDefinition stops the request too: dropping only the
                 // dictionary entries left the sim streaming the simvar forever,
                 // and SimConnect caps the number of live requests per client.
-                if (feed.RequestId != 0) _byRequest.Remove(feed.RequestId);
+                if (feed.RequestId != 0) _byRequest.TryRemove(feed.RequestId, out _);
                 if (feed.DefineId != 0)
                 {
                     _sc.ClearDataDefinition(feed.DefineId);
@@ -174,6 +198,7 @@ public sealed class ChecklistSimHost : IChecklistHost, IDisposable
         foreach (var feed in _feeds.Values) feed.Owner = null;
         _feeds.Clear();
         _byRequest.Clear();
+        lock (_subLock) { _subscriptions.Clear(); }
         _sc.OnConnected -= OnSimConnected;
         _sc.OnDataReceived -= OnDataReceived;
         GC.SuppressFinalize(this);

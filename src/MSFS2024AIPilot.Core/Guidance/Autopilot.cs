@@ -88,6 +88,7 @@ public sealed class HybridAutopilot
     private bool _lastApr, _lastNav;
     private int? _lastFlap;
     private bool? _lastGear;
+    private DateTime _lastDirectLog = DateTime.MinValue;
 
     public event Action<string>? OnLog;
 
@@ -134,6 +135,9 @@ public sealed class HybridAutopilot
     public void VerticalSpeedHold(double vsFpm)
     {
         // AP_VS_VAR_SET_ENGLISH takes the value scaled by 65536/1000 fpm per unit.
+        // The event payload is uint32 but MSFS interprets the high bit as sign:
+        // negative raw values (descents) are passed via unchecked two's-complement
+        // cast to uint, which MSFS reads back as a negative int32.
         var clamped = Environment.FlightEnvelope.ClampVerticalSpeedFpm(vsFpm, vsFpm > 0);
         var raw = (int)Math.Round(clamped * 65536.0 / 1000.0);
         _sc.FireEvent("AP_VS_VAR_SET_ENGLISH", unchecked((uint)raw));
@@ -279,7 +283,12 @@ public sealed class HybridAutopilot
         }
 
         SendAxes(pitchCmd, bankCmd, rudderCmd, throttle);
-        Log($"DIRECT pitch={pitchCmd:F3} bank={bankCmd:F3} rudder={rudderCmd:F3} throttle={throttle:F3} IAS={s.IndicatedAirspeed:F1}kt alt={s.Altitude:F0}ft hdg={s.TrueHeading:F0}°");
+        // Runs every control tick — rate-limit so the log file is not flooded.
+        if ((DateTime.UtcNow - _lastDirectLog).TotalSeconds >= 2.0)
+        {
+            _lastDirectLog = DateTime.UtcNow;
+            Log($"DIRECT pitch={pitchCmd:F3} bank={bankCmd:F3} rudder={rudderCmd:F3} throttle={throttle:F3} IAS={s.IndicatedAirspeed:F1}kt alt={s.Altitude:F0}ft hdg={s.TrueHeading:F0}°");
+        }
     }
 
     private static double FlightEnvelopeGuardMaxVs(AircraftState s) => 2500;
@@ -318,7 +327,7 @@ public sealed class HybridAutopilot
         Axis("AXIS_ELEVATOR_SET", pitch);
         Axis("AXIS_AILERONS_SET", bank);
         Axis("AXIS_RUDDER_SET", rudder);
-        _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(throttle * 16384), 0, 16384));
+        _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(throttle * 16384), 0, 16383));
     }
 
     private void Axis(string name, double value01)

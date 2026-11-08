@@ -40,6 +40,9 @@ public enum PilotControlState
 public sealed class AircraftState
 {
     // --- Position & motion ---
+    /// <summary>True once the first POSITION frame has been decoded — until then
+    /// lat/lon are 0,0 and must not be used for airport resolution.</summary>
+    public bool HasPosition { get; set; }
     public double Latitude { get; set; }
     public double Longitude { get; set; }
     public double Altitude { get; set; }          // MSL, feet

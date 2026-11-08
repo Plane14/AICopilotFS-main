@@ -63,6 +63,9 @@
                     <Button x:Name="BtnLoadPln" Content="Load flight plan (.pln)…" Padding="10,7" Margin="0,6,0,0" Click="BtnLoadPln_Click"
                             Background="{StaticResource PanelBrush}" Foreground="{StaticResource TextBrush}"
                             BorderBrush="#FF3A4250" BorderThickness="1" Cursor="Hand"/>
+                    <Button x:Name="BtnLoadSimPln" Content="Use sim's flight plan" Padding="10,7" Margin="0,6,0,0" Click="BtnLoadSimPln_Click"
+                            Background="{StaticResource PanelBrush}" Foreground="{StaticResource TextBrush}"
+                            BorderBrush="#FF3A4250" BorderThickness="1" Cursor="Hand"/>
 
                     <Separator Margin="0,16" Background="#FF3A4250"/>
                     <TextBlock Text="CHECKLIST" FontSize="11" FontWeight="Bold" Foreground="{StaticResource DimBrush}" Margin="0,0,0,6"/>

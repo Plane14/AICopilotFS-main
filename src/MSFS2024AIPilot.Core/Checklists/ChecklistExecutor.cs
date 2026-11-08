@@ -111,6 +111,8 @@ public sealed class ChecklistExecutor
             item.Actions.Clear();
             if (resolved.VerifySimVar != null)
                 item.Tests.Add(ConditionNode.Verify(resolved.VerifySimVar, resolved.VerifyUnits, resolved.ExpectOn));
+            foreach (var vs in resolved.VerifySimVars)
+                item.Tests.Add(ConditionNode.Verify(vs, resolved.VerifyUnits, resolved.ExpectOn));
             foreach (var (name, data) in resolved.Events)
                 item.Actions.Add(new ChecklistAction
                 {

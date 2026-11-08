@@ -13,6 +13,7 @@ namespace MSFS2024AIPilot.Core.Airports;
 public sealed class AirportFacilityLoader : IDisposable
 {
     private readonly SimConnectClient _sc;
+    private readonly object _lock = new();
     private uint _airportDefineId;
     private uint _nextRequestId = 50000;
     private readonly Dictionary<uint, PendingRequest> _pending = new();
@@ -113,10 +114,11 @@ public sealed class AirportFacilityLoader : IDisposable
     public uint RequestAirport(string icao)
     {
         EnsureDefinition();
-        var requestId = _nextRequestId++;
+        uint requestId;
+        lock (_lock) requestId = _nextRequestId++;
         var pending = new PendingRequest { Icao = icao };
         pending.Airport.Icao = icao;
-        _pending[requestId] = pending;
+        lock (_lock) _pending[requestId] = pending;
         Log($"Requesting facility data for {icao} (requestId={requestId})");
         _sc.RequestFacilityData(_airportDefineId, requestId, icao);
         return requestId;
@@ -126,14 +128,20 @@ public sealed class AirportFacilityLoader : IDisposable
     public uint RequestAirportList()
     {
         EnsureDefinition();
-        var requestId = _nextRequestId++;
+        uint requestId;
+        lock (_lock) requestId = _nextRequestId++;
         _sc.RequestFacilitiesList(FacilityListType.Airport, requestId);
         return requestId;
     }
 
     private void OnFacilityData(FacilityDataRecord rec)
     {
-        if (!_pending.TryGetValue(rec.UserRequestId, out var req)) return;
+        PendingRequest? req;
+        lock (_lock)
+        {
+            if (!_pending.TryGetValue(rec.UserRequestId, out var found)) return;
+            req = found;
+        }
         try
         {
             switch (rec.Type)
@@ -166,14 +174,19 @@ public sealed class AirportFacilityLoader : IDisposable
 
     private void OnFacilityDataEnd(uint userRequestId)
     {
-        if (!_pending.TryGetValue(userRequestId, out var req)) return;
+        PendingRequest? req;
+        lock (_lock)
+        {
+            if (!_pending.TryGetValue(userRequestId, out var found)) return;
+            req = found;
+            _pending.Remove(userRequestId);
+        }
         try
         {
             ResolveNodePositions(req);
             BuildEdges(req);
             var airport = req.Airport;
             airport.IsLoaded = airport.Nodes.Count > 0;
-            _pending.Remove(userRequestId);
             OnAirportLoadedForRequest?.Invoke(userRequestId, airport);
             Log($"Airport {airport.Icao} loaded: {airport.Nodes.Count} nodes, {airport.Runways.Count} runways, {airport.TaxiNames.Count} taxi names, path resolution={airport.PathResolutionRatio:P0}");
             OnAirportLoaded?.Invoke(airport);

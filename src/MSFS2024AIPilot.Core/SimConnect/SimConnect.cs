@@ -77,15 +77,18 @@ public sealed class SimConnectClient : IDisposable
 
         var openTask = Task.Run(() =>
         {
-            lock (_lock)
+            lock (_nativeLock)
             {
-                if (_connected) return;
+                lock (_lock)
+                {
+                    if (_connected) return;
+                }
                 try
                 {
                     var hr = SimConnect_Open(ref _handle, appName, IntPtr.Zero, 0, _msgEvent.SafeWaitHandle.DangerousGetHandle(), 0);
                     if (hr != 0 || _handle == IntPtr.Zero)
                         throw new SimConnectException($"SimConnect_Open failed with HRESULT 0x{hr:X8}. Ensure Microsoft Flight Simulator 2024 is running.");
-                    _connected = true;
+                    lock (_lock) _connected = true;
                 }
                 catch (DllNotFoundException ex)
                 {
@@ -116,16 +119,17 @@ public sealed class SimConnectClient : IDisposable
     }
 
     /// <summary>
-    /// Serialises <see cref="SimConnect_CallDispatch"/> against
-    /// <see cref="DisconnectQuietly"/> only — NOT against sends. Holding the
-    /// send lock while pumping messages let a stalled dispatch freeze every
-    /// SimConnect caller (control loop, ATC, facility loads).
+    /// Serialises every native SimConnect call — sends (TransmitClientEvent,
+    /// AddToDataDefinition, ...) and the dispatch pump (CallDispatch). Microsoft
+    /// documents that SimConnect clients are not thread-safe, so all native
+    /// calls must funnel through this one lock. <see cref="DisconnectQuietly"/>
+    /// also takes it, so the handle can never be closed mid-send or mid-pump.
     /// </summary>
-    private readonly object _dispatchLock = new();
+    private readonly object _nativeLock = new();
 
     private void DisconnectQuietly()
     {
-        lock (_dispatchLock)
+        lock (_nativeLock)
         lock (_lock)
         {
             if (!_connected) return;
@@ -151,22 +155,17 @@ public sealed class SimConnectClient : IDisposable
     /// </summary>
     public void Dispatch(int idleWaitMs = 0)
     {
-        IntPtr handle;
-        IntPtr context;
-        lock (_lock)
+        // All native SimConnect access (state check + CallDispatch) happens
+        // under _nativeLock so a send and a pump can never run concurrently.
+        lock (_nativeLock)
         {
-            if (_recvDelegate is null || !_connected || _handle == IntPtr.Zero) return;
-            handle = _handle;
-            context = _selfHandle.IsAllocated ? GCHandle.ToIntPtr(_selfHandle) : IntPtr.Zero;
-        }
-        // _dispatchLock keeps Disconnect from closing the handle mid-pump;
-        // _lock stays free so sends from other threads are never blocked by
-        // message processing.
-        lock (_dispatchLock)
-        {
+            IntPtr handle;
+            IntPtr context;
             lock (_lock)
             {
-                if (!_connected || _handle != handle) return;
+                if (_recvDelegate is null || !_connected || _handle == IntPtr.Zero) return;
+                handle = _handle;
+                context = _selfHandle.IsAllocated ? GCHandle.ToIntPtr(_selfHandle) : IntPtr.Zero;
             }
             // CallDispatch blocks until a message arrives on MSFS — only call
             // it while the sim says messages are pending, otherwise an idle
@@ -349,27 +348,30 @@ public sealed class SimConnectClient : IDisposable
         lock (_lock) return _nextDefineId++;
     }
 
-    private void SendNamed(string description, Func<int> send)
+    private bool SendNamed(string description, Func<int> send)
     {
-        lock (_lock)
+        lock (_nativeLock)
         {
-            if (_handle == IntPtr.Zero || !_connected)
+            lock (_lock)
             {
-                ReportSendFailure($"{description} not sent - the simulator connection is closed");
-                return;
+                if (_handle == IntPtr.Zero || !_connected)
+                {
+                    ReportSendFailure($"{description} not sent - the simulator connection is closed");
+                    return false;
+                }
             }
 
             var hr = send();
-            if (hr != 0) ReportSendFailure($"{description} failed with HRESULT 0x{hr:X8}");
+            if (hr != 0) { ReportSendFailure($"{description} failed with HRESULT 0x{hr:X8}"); return false; }
 
             uint packetId;
             try
             {
-                if (SimConnect_GetLastSentPacketID(_handle, out packetId) != 0) return;
+                if (SimConnect_GetLastSentPacketID(_handle, out packetId) != 0) return true;
             }
             catch
             {
-                return;
+                return true;
             }
 
             lock (_sentLock)
@@ -379,6 +381,7 @@ public sealed class SimConnectClient : IDisposable
                 while (_sentOrder.Count > RememberedSentCalls)
                     _sentCalls.Remove(_sentOrder.Dequeue().PacketId);
             }
+            return true;
         }
     }
 
@@ -464,6 +467,11 @@ public sealed class SimConnectClient : IDisposable
 
         var defineId = CreateDataDefinition();
         var sizes = new int[datums.Length];
+        // Build the list of sends while holding _definitionDatums, then send
+        // outside the lock: SendNamed takes _nativeLock, and the receive
+        // callback (under _nativeLock) reads _definitionDatums — holding both
+        // locks in opposite orders would deadlock.
+        var sends = new List<(string Description, Func<int> Send)>(datums.Length);
         lock (_definitionDatums)
         {
             if (!_definitionDatums.TryGetValue(defineId, out var names))
@@ -475,13 +483,14 @@ public sealed class SimConnectClient : IDisposable
             {
                 sizes[i] = StringDatumSize(datums[i].Size);
                 names.Add(datums[i].Name);
-                SendNamed($"add string datum '{datums[i].Name}' to definition {defineId}",
-                    () => SimConnect_AddToDataDefinition(_handle, defineId, datums[i].Name, "", (uint)datums[i].Size, 0, UnusedDatumId));
+                sends.Add(($"add string datum '{datums[i].Name}' to definition {defineId}",
+                    () => SimConnect_AddToDataDefinition(_handle, defineId, datums[i].Name, "", (uint)datums[i].Size, 0, UnusedDatumId)));
             }
             // Register before any data can arrive so the pump thread never
             // decodes this definition's payload as doubles.
             _stringDefinitions[defineId] = sizes;
         }
+        foreach (var (desc, send) in sends) SendNamed(desc, send);
         return defineId;
     }
 
@@ -501,7 +510,10 @@ public sealed class SimConnectClient : IDisposable
             Marshal.Copy(dataPtr + offset, buffer, 0, width);
             int end = Array.IndexOf(buffer, (byte)0);
             if (end < 0) end = buffer.Length;
-            results[i] = Encoding.UTF8.GetString(buffer, 0, end).Trim();
+            // SimConnect SimVar strings are ANSI bytes, not UTF-8 — high bytes
+            // (accented gate/airport names) decode to U+FFFD under UTF-8.
+            // Latin1 maps every byte 1:1 so nothing is lost.
+            results[i] = Encoding.Latin1.GetString(buffer, 0, end).Trim();
             offset += sizes[i];
         }
         return results;
@@ -526,12 +538,15 @@ public sealed class SimConnectClient : IDisposable
         {
             names = _definitionDatums.TryGetValue(defineId, out var list) ? string.Join(", ", list) : "(no datums recorded)";
         }
-        // Allocate the ID up front so a failed send still returns a unique,
-        // harmless request ID instead of 0 (which would collide in callers'
-        // request maps).
-        uint requestId = _nextRequestId++;
+        // Allocate the ID inside the send (under _nativeLock->_lock) so concurrent
+        // callers never get duplicate request IDs. A failed send still returns
+        // a unique, harmless request ID instead of 0.
+        uint requestId = 0;
         SendNamed($"request data for definition {defineId} [{names}]", () =>
-            SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit));
+        {
+            lock (_lock) requestId = _nextRequestId++;
+            return SimConnect_RequestDataOnSimObject(_handle, requestId, defineId, objectId, (uint)period, 0, 0, interval, limit);
+        });
         return requestId;
     }
 
@@ -560,7 +575,15 @@ public sealed class SimConnectClient : IDisposable
             id = _nextEventId++;
             _eventMap[eventName] = id;
             _eventNames[id] = eventName;
-            SendNamed($"map event '{eventName}' to id {id}", () => SimConnect_MapClientEventToSimEvent(_handle, id, eventName));
+            // If the sim rejects the mapping (unknown event name), un-cache it so
+            // a later call can retry instead of permanently blacklisting the name.
+            if (!SendNamed($"map event '{eventName}' to id {id}",
+                    () => SimConnect_MapClientEventToSimEvent(_handle, id, eventName)))
+            {
+                _eventMap.Remove(eventName);
+                _eventNames.Remove(id);
+                return id; // caller will attempt TransmitClientEvent, which will also fail and be reported
+            }
             return id;
         }
     }
@@ -605,47 +628,29 @@ public sealed class SimConnectClient : IDisposable
     #region Facilities API
 
     public void AddToFacilityDefinition(uint defineId, string fieldName)
-    {
-        lock (_lock)
-            SendNamed($"add facility field '{fieldName}' to definition {defineId}",
-                () => SimConnect_AddToFacilityDefinition(_handle, defineId, fieldName));
-    }
+        => SendNamed($"add facility field '{fieldName}' to definition {defineId}",
+            () => SimConnect_AddToFacilityDefinition(_handle, defineId, fieldName));
 
     public void RequestFacilityData(uint defineId, uint requestId, string icao, string region = "")
-    {
-        lock (_lock)
-            SendNamed($"request facility data for '{icao}' (definition {defineId}, request {requestId})",
-                () => SimConnect_RequestFacilityData(_handle, defineId, requestId, icao, region));
-    }
+        => SendNamed($"request facility data for '{icao}' (definition {defineId}, request {requestId})",
+            () => SimConnect_RequestFacilityData(_handle, defineId, requestId, icao, region));
 
     public void RequestFacilitiesList(FacilityListType listType, uint requestId)
-    {
-        lock (_lock)
-            SendNamed($"request facility list {listType} (request {requestId})",
-                () => SimConnect_RequestFacilitiesList(_handle, (uint)listType, requestId));
-    }
+        => SendNamed($"request facility list {listType} (request {requestId})",
+            () => SimConnect_RequestFacilitiesList(_handle, (uint)listType, requestId));
 
     #endregion
 
     public void FlightPlanLoad(string fileName)
-    {
-        lock (_lock)
-            SendNamed($"load flight plan '{fileName}'", () => SimConnect_FlightPlanLoad(_handle, fileName));
-    }
+        => SendNamed($"load flight plan '{fileName}'", () => SimConnect_FlightPlanLoad(_handle, fileName));
 
     public void AddClientEventToNotificationGroup(uint groupId, uint eventId, bool maskable = false)
-    {
-        lock (_lock)
-            SendNamed($"add event id {eventId} to notification group {groupId}",
-                () => SimConnect_AddClientEventToNotificationGroup(_handle, groupId, eventId, maskable ? 1 : 0));
-    }
+        => SendNamed($"add event id {eventId} to notification group {groupId}",
+            () => SimConnect_AddClientEventToNotificationGroup(_handle, groupId, eventId, maskable ? 1 : 0));
 
     public void SetNotificationGroupPriority(uint groupId, uint priority)
-    {
-        lock (_lock)
-            SendNamed($"set notification group {groupId} priority {priority}",
-                () => SimConnect_SetNotificationGroupPriority(_handle, groupId, priority));
-    }
+        => SendNamed($"set notification group {groupId} priority {priority}",
+            () => SimConnect_SetNotificationGroupPriority(_handle, groupId, priority));
 
     /// <summary>Executes a sim event by name with an optional integer payload (axis values are doubles).</summary>
     public void ExecuteAction(string actionName, params object[] args)

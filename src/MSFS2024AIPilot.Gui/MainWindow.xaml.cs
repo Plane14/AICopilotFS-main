@@ -100,6 +100,19 @@ public partial class MainWindow : Window
         finally { BtnLoadPln.IsEnabled = true; }
     }
 
+    private async void BtnLoadSimPln_Click(object sender, RoutedEventArgs e)
+    {
+        BtnLoadSimPln.IsEnabled = false;
+        try
+        {
+            var ok = await Engine.LoadSimFlightPlanAsync();
+            TxtError.Text = ok ? "" : "Could not load the sim's flight plan";
+            if (ok) RbSingle.IsChecked = true;
+        }
+        catch (Exception ex) { TxtError.Text = ex.Message; }
+        finally { BtnLoadSimPln.IsEnabled = true; }
+    }
+
     private void ApplyStatus(PilotStatus s)
     {
         TxtPhase.Text = s.Phase.ToString();

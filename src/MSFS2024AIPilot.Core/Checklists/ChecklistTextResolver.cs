@@ -21,6 +21,8 @@ public sealed class SwitchCommand
 {
     public string? VerifySimVar;
     public string VerifyUnits = "bool";
+    /// <summary>Additional simvars that must all verify (e.g. both avionics buses).</summary>
+    public List<string> VerifySimVars = new();
     public bool ExpectOn = true;
     public List<(string Name, double Data)> Events = new();
     public AsRequiredMode AsRequired = AsRequiredMode.None;
@@ -293,6 +295,31 @@ public static class ChecklistTextResolver
         if (env.Turbine && (ContainsWord(canonSubject, "MIXTURE") || ContainsWord(canonSubject, "MIX")))
         {
             cmd.ManualReason = "no mixture lever on a turbine";
+            return cmd;
+        }
+
+        // MSFS 2024 electrical-system aircraft give each avionics bus its own
+        // AVIONICS_MASTER_n_SET event and AVIONICS MASTER SWITCH:n simvar; the
+        // legacy AVIONICS_MASTER_SET is a no-op on them (verified live on the
+        // Asobo C172: _SET 0/1 flips the simvar, AVIONICS_MASTER_SET does not).
+        if (ContainsWord(canonSubject, "AVIONICS") &&
+            (canonSubject.Contains("BUS 1", StringComparison.Ordinal) ||
+             canonSubject.Contains("BUS 2", StringComparison.Ordinal)))
+        {
+            var busOn = !IsOffExpectation(canonExpect);
+            var busData = busOn ? 1 : 0;
+            cmd.ExpectOn = busOn;
+            cmd.VerifyUnits = "bool";
+            if (canonSubject.Contains("BUS 1", StringComparison.Ordinal))
+            {
+                cmd.Events.Add(("AVIONICS_MASTER_1_SET", busData));
+                cmd.VerifySimVars.Add("AVIONICS MASTER SWITCH:1");
+            }
+            if (canonSubject.Contains("BUS 2", StringComparison.Ordinal))
+            {
+                cmd.Events.Add(("AVIONICS_MASTER_2_SET", busData));
+                cmd.VerifySimVars.Add("AVIONICS MASTER SWITCH:2");
+            }
             return cmd;
         }
 

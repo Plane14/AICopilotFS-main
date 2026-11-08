@@ -74,7 +74,9 @@ public sealed class ContinuousFlightPlanner
                 _airportIcaos.Add(icao);
             _positions[icao] = (lat, lon, altM);
         }
-        Log($"Airport list item: {icao} at ({lat:F4},{lon:F4}) alt={altM:F0}m (count={_airportIcaos.Count})");
+        // No per-item logging: the list has ~80k entries and a synchronous log
+        // write per item stalls the SimConnect dispatch pump for tens of
+        // seconds while the sim keeps streaming facility data.
     }
 
     private void OnListEnd(uint requestId)

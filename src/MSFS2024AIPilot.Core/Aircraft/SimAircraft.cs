@@ -33,6 +33,7 @@ public sealed class SimAircraft : IDisposable
     private uint _atcTextDefineId, _titleDefineId;
     private long _lastNotifiedVersion = -1;
     private readonly Dictionary<string, DateTime> _lastBlockLog = new();
+    private string? _lastAtcTextLog;
 
     private const uint RequestAircraftTitle = 90001;
     private const uint EventAircraftLoaded = 90002;
@@ -464,7 +465,8 @@ public sealed class SimAircraft : IDisposable
                 atc.StationType = OrNull(8);
                 atc.NativeStateUtc = DateTime.UtcNow;
                 _state.Timestamp = DateTime.UtcNow;
-                Log($"ATCTEXT ident={atc.AircraftIdent} rwyTO={atc.DesignatedRunwayTakeoff} rwyLD={atc.DesignatedRunwayLanding} gateArr={atc.DesignatedGateArrival} gateDep={atc.DesignatedGateDeparture} nextController={atc.NextControllerName} nextWP={atc.NextWaypointName}");
+                var atcTextLog = $"ATCTEXT ident={atc.AircraftIdent} rwyTO={atc.DesignatedRunwayTakeoff} rwyLD={atc.DesignatedRunwayLanding} gateArr={atc.DesignatedGateArrival} gateDep={atc.DesignatedGateDeparture} nextController={atc.NextControllerName} nextWP={atc.NextWaypointName}";
+                if (atcTextLog != _lastAtcTextLog) { _lastAtcTextLog = atcTextLog; Log(atcTextLog); }
             }
         }
     }
@@ -550,6 +552,7 @@ public sealed class SimAircraft : IDisposable
             switch (block)
             {
                 case "POSITION":
+                    _state.HasPosition = true;
                     _state.Latitude = D(0); _state.Longitude = D(1);
                     _state.Altitude = D(2); _state.AltitudeAGL = D(3);
                     if (ShouldLog(block)) Log($"POSITION lat={_state.Latitude:F4} lon={_state.Longitude:F4} alt={_state.Altitude:F0}ft AGL={_state.AltitudeAGL:F0}ft");
@@ -597,13 +600,13 @@ public sealed class SimAircraft : IDisposable
                         egt[e] = RankineToCelsius(D(b)); rpm[e] = D(b + 1);
                     }
                     _state.EngineEgtC = egt; _state.EngineMaxRpmPct = rpm;
-                    Log($"ENGINE_LIMITS count={count} EgtC=[{string.Join(",", egt.Select(x => x.ToString("F0")))}] MaxRpmPct=[{string.Join(",", rpm.Select(x => x.ToString("F0")))}]");
+                    if (ShouldLog(block)) Log($"ENGINE_LIMITS count={count} EgtC=[{string.Join(",", egt.Select(x => x.ToString("F0")))}] MaxRpmPct=[{string.Join(",", rpm.Select(x => x.ToString("F0")))}]");
                     break;
                 }
                 case "FUEL":
                     _state.TotalFuelWeight = D(0); _state.TotalFuelQuantity = D(1);
                     _state.GrossWeight = D(3); _state.CGPercent = D(5);
-                    Log($"FUEL weight={_state.TotalFuelWeight:F0}lb qty={_state.TotalFuelQuantity:F0}gal gross={_state.GrossWeight:F0}lb CG={_state.CGPercent:F1}%");
+                    if (ShouldLog(block)) Log($"FUEL weight={_state.TotalFuelWeight:F0}lb qty={_state.TotalFuelQuantity:F0}gal gross={_state.GrossWeight:F0}lb CG={_state.CGPercent:F1}%");
                     break;
                 case "AUTOPILOT":
                     _state.Autopilot.MasterSwitch = D(0) > 0.5;
@@ -620,7 +623,7 @@ public sealed class SimAircraft : IDisposable
                     _state.WindDirection = D(0); _state.WindVelocity = D(1);
                     _state.OAT = D(2); _state.Barometer = D(3);
                     _state.PressureAltitude = D(4); _state.SimTimeSeconds = D(5);
-                    Log($"ENVIRONMENT wind={_state.WindDirection:F0}°/{_state.WindVelocity:F1}kt OAT={_state.OAT:F1}°C baro={_state.Barometer:F2}inHg pressAlt={_state.PressureAltitude:F0}ft");
+                    if (ShouldLog(block)) Log($"ENVIRONMENT wind={_state.WindDirection:F0}°/{_state.WindVelocity:F1}kt OAT={_state.OAT:F1}°C baro={_state.Barometer:F2}inHg pressAlt={_state.PressureAltitude:F0}ft");
                     break;
                 case "NAVIGATION":
                     _state.Navigation.DistanceToNextWaypoint = D(0);
@@ -674,7 +677,7 @@ public sealed class SimAircraft : IDisposable
                     _state.Com2ActiveFrequency = FormatFrequency(D(2));
                     _state.Com2StandbyFrequency = FormatFrequency(D(3));
                     _state.Squawk = D(4).ToString("0000");
-                    Log($"COM1 active={_state.Com1ActiveFrequency} stby={_state.Com1StandbyFrequency} COM2 active={_state.Com2ActiveFrequency} stby={_state.Com2StandbyFrequency} squawk={_state.Squawk}");
+                    if (ShouldLog(block)) Log($"COM1 active={_state.Com1ActiveFrequency} stby={_state.Com1StandbyFrequency} COM2 active={_state.Com2ActiveFrequency} stby={_state.Com2StandbyFrequency} squawk={_state.Squawk}");
                     break;
                 case "ATC":
                 {
@@ -704,7 +707,7 @@ public sealed class SimAircraft : IDisposable
                     atc.FlightPlanAltitudeDeviationM = D(21);
                     atc.FlightPlanTrackDeviationM = D(22);
                     atc.NativeStateUtc = DateTime.UtcNow;
-                    Log($"ATC clearedIFR={atc.ClearedIfr} clearedTaxi={atc.ClearedTaxi} clearedTO={atc.ClearedTakeoff} clearedLand={atc.ClearedLanding} assignedAlt={atc.AssignedAltitudeFt}ft rwySel={atc.RunwaySelected} rwyLen={atc.RunwayLengthMeters}m twr={atc.AirportIsTowered} onParking={atc.OnParkingSpot}");
+                    if (ShouldLog(block)) Log($"ATC clearedIFR={atc.ClearedIfr} clearedTaxi={atc.ClearedTaxi} clearedTO={atc.ClearedTakeoff} clearedLand={atc.ClearedLanding} assignedAlt={atc.AssignedAltitudeFt}ft rwySel={atc.RunwaySelected} rwyLen={atc.RunwayLengthMeters}m twr={atc.AirportIsTowered} onParking={atc.OnParkingSpot}");
                     break;
                 }
                 case "WEATHER":
@@ -726,7 +729,7 @@ public sealed class SimAircraft : IDisposable
                         ? (PushbackDirection)(int)Math.Round(D(3))
                         : PushbackDirection.Straight;
                     _state.Pushback.AngleRadians = D(4);
-                    Log($"PUSHBACK attached={_state.Pushback.Attached} available={_state.Pushback.Available} waiting={_state.Pushback.Waiting} dir={_state.Pushback.Direction} angle={_state.Pushback.AngleRadians:F2}rad");
+                    if (ShouldLog(block)) Log($"PUSHBACK attached={_state.Pushback.Attached} available={_state.Pushback.Available} waiting={_state.Pushback.Waiting} dir={_state.Pushback.Direction} angle={_state.Pushback.AngleRadians:F2}rad");
                     break;
             }
             _state.Timestamp = DateTime.UtcNow;
