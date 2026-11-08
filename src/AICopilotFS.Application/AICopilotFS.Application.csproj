@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AICopilotFS.Application</RootNamespace>
+    <AssemblyName>AICopilotFS.Application</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AICopilotFS.Domain\AICopilotFS.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

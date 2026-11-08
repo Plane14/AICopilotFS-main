@@ -1,0 +1,57 @@
+<Window x:Class="AICopilotFS.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="AICopilotFS — MSFS 2024 AI Pilot"
+        Height="700" Width="1000">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Connection & Mode -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Content="Connect" Width="80" Margin="0,0,10,0"/>
+            <Button Content="Engage" Width="80" Margin="0,0,10,0"/>
+            <Button Content="Disengage" Width="80" Margin="0,0,10,0"/>
+            <TextBlock Text="Mode:" Margin="20,0,5,0" VerticalAlignment="Center"/>
+            <ComboBox Width="120" Margin="0,0,10,0">
+                <ComboBoxItem Content="Off"/>
+                <ComboBoxItem Content="Single"/>
+                <ComboBoxItem Content="Continuous"/>
+            </ComboBox>
+        </StackPanel>
+
+        <!-- Telemetry -->
+        <TabControl Grid.Row="1">
+            <TabItem Header="Telemetry">
+                <StackPanel>
+                    <TextBlock Text="Phase:" Style="{StaticResource TelemetryText}"/>
+                    <TextBlock Text="Altitude:" Style="{StaticResource TelemetryText}"/>
+                    <TextBlock Text="Speed:" Style="{StaticResource TelemetryText}"/>
+                    <TextBlock Text="Heading:" Style="{StaticResource TelemetryText}"/>
+                    <TextBlock Text="Terrain Clearance:" Style="{StaticResource TelemetryText}"/>
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Checklist">
+                <StackPanel>
+                    <TextBlock Text="Checklist items will appear here."/>
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Log">
+                <StackPanel>
+                    <TextBlock Text="Log output will appear here."/>
+                </StackPanel>
+            </TabItem>
+        </TabControl>
+
+        <!-- Status -->
+        <StatusBar Grid.Row="2">
+            <TextBlock Name="StatusText" Text="Ready"/>
+        </StatusBar>
+    </Grid>
+</Window>
