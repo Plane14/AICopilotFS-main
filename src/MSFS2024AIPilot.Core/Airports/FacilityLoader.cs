@@ -40,6 +40,21 @@ public sealed class AirportFacilityLoader : IDisposable
 
     private bool _definitionSent;
 
+    /// <summary>
+    /// Drops all per-connection state after a SimConnect reconnect: the data
+    /// definition id and pending request map refer to the dead connection and
+    /// must be rebuilt on the next request.
+    /// </summary>
+    public void ResetForReconnect()
+    {
+        lock (_lock)
+        {
+            _definitionSent = false;
+            _airportDefineId = 0;
+            _pending.Clear();
+        }
+    }
+
     private void EnsureDefinition()
     {
         if (_definitionSent || _airportDefineId != 0) return;
@@ -146,24 +161,16 @@ public sealed class AirportFacilityLoader : IDisposable
         {
             switch (rec.Type)
             {
-                case FacilityDataType.Airport:
-                    Log($"Airport record received for {req.Airport.Icao}");
-                    ParseAirport(rec, req); break;
-                case FacilityDataType.Runway:
-                    Log($"Runway record received for {req.Airport.Icao} (runway #{req.Airport.Runways.Count + 1})");
-                    ParseRunway(rec, req); break;
-                case FacilityDataType.TaxiName:
-                    Log($"TaxiName record received for {req.Airport.Icao} (name #{req.TaxiNames.Count + 1})");
-                    ParseTaxiName(rec, req); break;
-                case FacilityDataType.TaxiPoint:
-                    Log($"TaxiPoint record received for {req.Airport.Icao} (index={rec.ItemIndex})");
-                    ParseTaxiPoint(rec, req); break;
-                case FacilityDataType.TaxiParking:
-                    Log($"TaxiParking record received for {req.Airport.Icao} (parking #{req.RawTaxiParking.Count + 1})");
-                    ParseTaxiParking(rec, req); break;
-                case FacilityDataType.TaxiPath:
-                    Log($"TaxiPath record received for {req.Airport.Icao} (path #{req.RawTaxiPaths.Count + 1})");
-                    ParseTaxiPath(rec, req); break;
+                // Per-record logging is deliberately absent: a single airport
+                // emits hundreds of taxi-path/point records and one log line
+                // each flooded the daily log (and stalled the pump on slow
+                // disks). The completion summary below carries the totals.
+                case FacilityDataType.Airport: ParseAirport(rec, req); break;
+                case FacilityDataType.Runway: ParseRunway(rec, req); break;
+                case FacilityDataType.TaxiName: ParseTaxiName(rec, req); break;
+                case FacilityDataType.TaxiPoint: ParseTaxiPoint(rec, req); break;
+                case FacilityDataType.TaxiParking: ParseTaxiParking(rec, req); break;
+                case FacilityDataType.TaxiPath: ParseTaxiPath(rec, req); break;
             }
         }
         catch (Exception ex)

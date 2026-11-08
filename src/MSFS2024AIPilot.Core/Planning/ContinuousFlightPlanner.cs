@@ -26,7 +26,10 @@ public sealed class ContinuousFlightPlanner
     private readonly HashSet<string> _airportIcaoSet = new(StringComparer.OrdinalIgnoreCase);
     private uint _listRequestId;
     private readonly object _lock = new();
-    private readonly TaskCompletionSource<bool> _listReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Recreated per request: ConnectAsync re-requests the list after every
+    // reconnect, and a completed TCS would make WaitForAirportListAsync return
+    // immediately against the previous connection's (possibly partial) list.
+    private TaskCompletionSource<bool> _listReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>Maximum leg distance in nautical miles (0 = unlimited).</summary>
     public double MaxRangeNm { get; set; } = 400;
@@ -60,8 +63,13 @@ public sealed class ContinuousFlightPlanner
     public void RequestAirportList()
     {
         Log("Requesting airport list from SimConnect...");
+        // -= first: ConnectAsync re-requests the list after every reconnect
+        // and += alone would stack duplicate handlers on each attempt.
+        _loader.SimConnect.OnAirportListItem -= OnListItem;
         _loader.SimConnect.OnAirportListItem += OnListItem;
+        _loader.SimConnect.OnAirportListEnd -= OnListEnd;
         _loader.SimConnect.OnAirportListEnd += OnListEnd;
+        _listReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _listRequestId = _loader.RequestAirportList();
     }
 

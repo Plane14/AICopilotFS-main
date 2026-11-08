@@ -103,6 +103,8 @@ public sealed class PilotEngine : IDisposable
     private NavigationState? _routeNav;
     private AirportData? _departureAirport;
     private AirportData? _destinationAirport;
+    private readonly PidGainStore _pidStore = PidGainStore.Load(PidGainStore.DefaultPath);
+    private AircraftControlProfile _profile = AircraftControlProfile.ForKind(AircraftKind.Airplane, new AircraftPerformance());
     private AircraftPerformance _performance = new();
 
     // Phase-specific working state
@@ -173,6 +175,9 @@ public sealed class PilotEngine : IDisposable
         _reconnecting = true;
         try
         {
+            // Facility definitions/request ids belong to the dead connection —
+            // rebuild them lazily on the next request after reconnect.
+            _facilities.ResetForReconnect();
             while (!_loopCts.Token.IsCancellationRequested)
             {
                 try { await Task.Delay(5000, _loopCts.Token); } catch { return; }
@@ -551,6 +556,11 @@ public sealed class PilotEngine : IDisposable
             _gearFloatsObserved = true;
             _aircraftKind = AircraftKindDetector.ObserveGearFloats(_aircraftKind);
             _planner.Kind = _aircraftKind;
+            var t = string.IsNullOrWhiteSpace(_status.AircraftTitle) ? _aircraft.AircraftTitle : _status.AircraftTitle;
+            _profile = _pidStore.Resolve(t, _aircraftKind, _performance);
+            _pidStore.Seed(t, _profile);
+            _pidStore.Save(PidGainStore.DefaultPath);
+            _ap.ApplyProfile(_profile);
             lock (_lock) _status.AircraftKind = _aircraftKind;
             Log($"[Pilot] Floats detected — aircraft classified as {_aircraftKind}.");
         }
@@ -1247,28 +1257,75 @@ public sealed class PilotEngine : IDisposable
             return;
         }
 
-        // Follow the taxi route: steer toward the next node, taxi speed.
+        // Follow the taxi route: steer toward the next node, realistic speed.
         var leg = legs[_taxiLegIndex];
         var toNode = _departureAirport!.FindNode(leg.ToNode);
+        var fromNode = _departureAirport.FindNode(leg.FromNode);
         if (toNode is null) { _taxiLegIndex++; return; }
-
         var bearing = GeoMath.BearingDeg(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
         var dist = GeoMath.DistanceMeters(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
         t.TargetHeadingDeg = bearing;
-        t.TargetAirspeedKt = null; // ground handling: use throttle directly
-        t.ThrottleFraction = dist > 80 ? 0.18 : dist > 30 ? 0.10 : 0.05;
+        t.TargetAirspeedKt = null; // ground handling: use throttle/brakes directly
 
-        // Slow for the hold-short: the last leg ends there.
-        if (_taxiLegIndex == legs.Count - 1)
+        var apron = fromNode?.Type == GroundNodeType.Parking || toNode.Type == GroundNodeType.Parking;
+        var toHoldShort = toNode.Type is GroundNodeType.HoldShort or GroundNodeType.IlsHoldShort;
+        var adverse = s.PrecipitationState > 0 || (s.SurfaceInfoValid && s.SurfaceCondition > 0.5) ||
+                      s.WindVelocity > 18;
+
+        double turnAngle = 0;
+        bool rightTurn = false;
+        if (_taxiLegIndex + 1 < legs.Count)
         {
-            if (dist < 15)
-            {
-                t.ThrottleFraction = 0;
-                _ap.ParkingBrake(true);
-            }
+            var next = legs[_taxiLegIndex + 1];
+            turnAngle = Math.Abs(GeoMath.AngleDelta(leg.BearingDegrees, next.BearingDegrees));
+            var signed = GeoMath.NormalizeDeg(next.BearingDegrees - leg.BearingDegrees);
+            rightTurn = signed > 0;
         }
 
-        if (dist < 12) { _taxiLegIndex++; return; }
+        var targetSpeed = TaxiSpeedController.TargetSpeedKt(_profile, dist, turnAngle, apron,
+            leg.CrossesRunway, toHoldShort, adverse);
+
+        // Throttle modulation to hold the target ground speed.
+        var gs = s.GroundSpeed;
+        double throttle;
+        if (targetSpeed <= 0.5) throttle = 0;
+        else if (gs < targetSpeed - 2) throttle = (dist > 40 ? 0.16 : 0.10);
+        else if (gs > targetSpeed + 2) throttle = 0.03;
+        else throttle = 0.06;
+
+        // Braking: decelerate above target and stab-brake into turns/hold-short.
+        double brake = 0;
+        if (gs > targetSpeed + 3) brake = 0.45;
+        if (turnAngle >= _profile.TurnDetectionAngleDeg && dist < 25) brake = Math.Max(brake, 0.35);
+        if (toHoldShort && dist < _profile.HoldShortDecelDistanceM) brake = Math.Max(brake, 0.6);
+        if (brake > 0)
+        {
+            double left = brake, right = brake;
+            if (turnAngle >= _profile.TurnDetectionAngleDeg && dist < 20)
+            {
+                if (rightTurn) right = Math.Min(1, brake + 0.25);
+                else left = Math.Min(1, brake + 0.25);
+            }
+            _ap.SetBrakes(left, right);
+        }
+        else _ap.ReleaseBrakes();
+
+        t.ThrottleFraction = throttle;
+
+        // Slow for the hold-short: the last leg ends there.
+        if (toHoldShort && dist < 8)
+        {
+            t.ThrottleFraction = 0;
+            _ap.SetBrakes(0.8, 0.8);
+        }
+        if (toHoldShort && dist < 3)
+        {
+            t.ThrottleFraction = 0;
+            _ap.ParkingBrake(true);
+            _ap.ReleaseBrakes();
+        }
+
+        if (dist < 12) { _taxiLegIndex++; _ap.ReleaseBrakes(); return; }
     }
 
     /// <summary>The runway the current phase is using, for traffic assessment.</summary>
@@ -1520,6 +1577,7 @@ public sealed class PilotEngine : IDisposable
         if (!TrafficAllowsRunwayEntry()) return;
         SetPhase(FlightPhase.Takeoff);
         _ap.ParkingBrake(false);
+        _ap.ReleaseBrakes(); // hold-short stab braking must not bleed into the roll
         _takeoffClearanceRequested = false;
     }
 
@@ -2194,6 +2252,7 @@ public sealed class PilotEngine : IDisposable
         var legs = _taxiRoute.Legs;
         if (_taxiLegIndex >= legs.Count)
         {
+            _ap.ReleaseBrakes();
             _ap.ParkingBrake(true);
             _ap.SetThrottleFraction(0);
             if (_status.Mode == PilotMode.Continuous) BeginTurnaround(s);
@@ -2203,14 +2262,62 @@ public sealed class PilotEngine : IDisposable
 
         var leg = legs[_taxiLegIndex];
         var toNode = _destinationAirport.FindNode(leg.ToNode);
+        var fromNode = _destinationAirport.FindNode(leg.FromNode);
         if (toNode is null) { _taxiLegIndex++; return; }
         var dist = GeoMath.DistanceMeters(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
         t.TargetHeadingDeg = GeoMath.BearingDeg(s.Latitude, s.Longitude, toNode.Latitude, toNode.Longitude);
-        t.ThrottleFraction = dist > 60 ? 0.15 : dist > 25 ? 0.08 : 0.03;
+
+        var apron = fromNode?.Type == GroundNodeType.Parking || toNode.Type == GroundNodeType.Parking;
+        var toHoldShort = toNode.Type is GroundNodeType.HoldShort or GroundNodeType.IlsHoldShort;
+        var adverse = s.PrecipitationState > 0 || (s.SurfaceInfoValid && s.SurfaceCondition > 0.5) ||
+                      s.WindVelocity > 18;
+
+        double turnAngle = 0;
+        bool rightTurn = false;
+        if (_taxiLegIndex + 1 < legs.Count)
+        {
+            var next = legs[_taxiLegIndex + 1];
+            turnAngle = Math.Abs(GeoMath.AngleDelta(leg.BearingDegrees, next.BearingDegrees));
+            var signed = GeoMath.NormalizeDeg(next.BearingDegrees - leg.BearingDegrees);
+            rightTurn = signed > 0;
+        }
+
+        var targetSpeed = TaxiSpeedController.TargetSpeedKt(_profile, dist, turnAngle, apron,
+            leg.CrossesRunway, toHoldShort, adverse);
+
+        var gs = s.GroundSpeed;
+        double throttle;
+        if (targetSpeed <= 0.5) throttle = 0;
+        else if (gs < targetSpeed - 2) throttle = (dist > 40 ? 0.14 : 0.09);
+        else if (gs > targetSpeed + 2) throttle = 0.03;
+        else throttle = 0.05;
+
+        double brake = 0;
+        if (gs > targetSpeed + 3) brake = 0.4;
+        if (turnAngle >= _profile.TurnDetectionAngleDeg && dist < 25) brake = Math.Max(brake, 0.3);
+        if (brake > 0)
+        {
+            double left = brake, right = brake;
+            if (turnAngle >= _profile.TurnDetectionAngleDeg && dist < 20)
+            {
+                if (rightTurn) right = Math.Min(1, brake + 0.2);
+                else left = Math.Min(1, brake + 0.2);
+            }
+            _ap.SetBrakes(left, right);
+        }
+        else _ap.ReleaseBrakes();
+
+        t.ThrottleFraction = throttle;
+        if (toHoldShort && dist < 8)
+        {
+            t.ThrottleFraction = 0;
+            _ap.SetBrakes(0.7, 0.7);
+        }
         if (dist < 10)
         {
             Log($"[Pilot] Taxi leg {_taxiLegIndex + 1}/{legs.Count} reached node {leg.ToNode}");
             _taxiLegIndex++;
+            _ap.ReleaseBrakes();
         }
     }
     private bool _taxiInPlanned;
@@ -2581,6 +2688,10 @@ if (_route is not null && (_status.Phase is FlightPhase.Preflight or FlightPhase
                 _planner.RequiredRunwayMeters = 0;
                 _planner.MinRangeNm = 10;
             }
+            _profile = _pidStore.Resolve(title, _aircraftKind, _performance);
+            _pidStore.Seed(title, _profile);
+            _pidStore.Save(PidGainStore.DefaultPath);
+            _ap.ApplyProfile(_profile);
             lock (_lock) _status.AircraftKind = _aircraftKind;
             Log($"[Pilot] Aircraft: {title} — {_aircraftKind} (flightchecklist.app, no package cfg)");
             PublishStatus();
@@ -2617,6 +2728,10 @@ if (_route is not null && (_status.Phase is FlightPhase.Preflight or FlightPhase
             {
                 Log($"[Pilot] {_aircraftKind}: water runways preferred for all legs.");
             }
+            _profile = _pidStore.Resolve(displayTitle, _aircraftKind, _performance);
+            _pidStore.Seed(displayTitle, _profile);
+            _pidStore.Save(PidGainStore.DefaultPath);
+            _ap.ApplyProfile(_profile);
             PublishStatus();
             }
             catch (Exception ex) { Log($"[Pilot] Performance parse failed: {ex.Message}"); }

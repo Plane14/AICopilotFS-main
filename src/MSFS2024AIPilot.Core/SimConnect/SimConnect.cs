@@ -142,7 +142,23 @@ public sealed class SimConnectClient : IDisposable
             {
                 _handle = IntPtr.Zero;
                 _connected = false;
-                lock (_definitionDatums) _stringDefinitions.Clear();
+                // Everything below is per-connection state: event mappings,
+                // data definitions and packet-id attribution all die with the
+                // handle. Leaving them cached makes a reconnect transmit
+                // event ids the new connection never mapped (controls go
+                // silently dead) and misattribute exception reports.
+                lock (_definitionDatums)
+                {
+                    _definitionDatums.Clear();
+                    _stringDefinitions.Clear();
+                }
+                _eventMap.Clear();
+                _eventNames.Clear();
+                lock (_sentLock)
+                {
+                    _sentCalls.Clear();
+                    _sentOrder.Clear();
+                }
             }
         }
     }
@@ -483,8 +499,12 @@ public sealed class SimConnectClient : IDisposable
             {
                 sizes[i] = StringDatumSize(datums[i].Size);
                 names.Add(datums[i].Name);
-                sends.Add(($"add string datum '{datums[i].Name}' to definition {defineId}",
-                    () => SimConnect_AddToDataDefinition(_handle, defineId, datums[i].Name, "", (uint)datums[i].Size, 0, UnusedDatumId)));
+                // Copy to locals — the lambda runs after the loop, when the
+                // loop variable would already be datums.Length.
+                var dName = datums[i].Name;
+                var dSize = datums[i].Size;
+                sends.Add(($"add string datum '{dName}' to definition {defineId}",
+                    () => SimConnect_AddToDataDefinition(_handle, defineId, dName, "", (uint)dSize, 0, UnusedDatumId)));
             }
             // Register before any data can arrive so the pump thread never
             // decodes this definition's payload as doubles.

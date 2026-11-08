@@ -1,4 +1,5 @@
 using System;
+using MSFS2024AIPilot.Core.Aircraft;
 using MSFS2024AIPilot.Core.SimConnect;
 using MSFS2024AIPilot.Core.State;
 
@@ -67,11 +68,13 @@ public sealed class HybridAutopilot
     private ControlTargets _targets = new();
     private ControlTargets _active = new();
 
-    // Direct-control loops (per-phase instances via ResetAll).
-    private readonly PidLoop _pitch = new(0.02, 0.002, 0.05);
-    private readonly PidLoop _bank = new(0.03, 0.001, 0.04);
-    private readonly PidLoop _speed = new(0.01, 0.005, 0.02);
-    private readonly PidLoop _altitude = new(0.005, 0.0005, 0.02);
+    // Direct-control loops (per-profile instances via ApplyProfile).
+    private PidLoop _pitch = new(0.02, 0.002, 0.05);
+    private PidLoop _bank = new(0.03, 0.001, 0.04);
+    private PidLoop _speed = new(0.01, 0.005, 0.02);
+    private PidLoop _altitude = new(0.005, 0.0005, 0.02);
+
+    private AircraftControlProfile _profile = AircraftControlProfile.ForKind(AircraftKind.Airplane, new AircraftPerformance());
 
     private bool _directMode;
     private bool _axesNeutralised;
@@ -94,7 +97,22 @@ public sealed class HybridAutopilot
 
     private static bool Near(double? a, double b) => a is { } x && Math.Abs(x - b) < 0.5;
 
-    public HybridAutopilot(SimConnectClient sc) => _sc = sc;
+    public HybridAutopilot(SimConnectClient sc, AircraftControlProfile? profile = null)
+    {
+        _sc = sc;
+        if (profile is not null) ApplyProfile(profile);
+    }
+
+    public void ApplyProfile(AircraftControlProfile profile)
+    {
+        _profile = profile;
+        _pitch = new PidLoop(profile.Pitch.Kp, profile.Pitch.Ki, profile.Pitch.Kd, profile.Pitch.IntegralLimit);
+        _bank = new PidLoop(profile.Bank.Kp, profile.Bank.Ki, profile.Bank.Kd, profile.Bank.IntegralLimit);
+        _speed = new PidLoop(profile.Speed.Kp, profile.Speed.Ki, profile.Speed.Kd, profile.Speed.IntegralLimit);
+        _altitude = new PidLoop(profile.Altitude.Kp, profile.Altitude.Ki, profile.Altitude.Kd, profile.Altitude.IntegralLimit);
+        ResetAll();
+        Log($"Profile applied: {profile.Kind} maxBank={profile.MaxBankDeg:F0} ctrl={profile.ControlAuthority:F2}");
+    }
 
     private void Log(string msg) => OnLog?.Invoke($"[Autopilot] {msg}");
 
@@ -134,12 +152,12 @@ public sealed class HybridAutopilot
     }
     public void VerticalSpeedHold(double vsFpm)
     {
-        // AP_VS_VAR_SET_ENGLISH takes the value scaled by 65536/1000 fpm per unit.
-        // The event payload is uint32 but MSFS interprets the high bit as sign:
-        // negative raw values (descents) are passed via unchecked two's-complement
-        // cast to uint, which MSFS reads back as a negative int32.
+        // AP_VS_VAR_SET_ENGLISH takes the reference vertical speed directly in
+        // feet per minute (per the MSFS event docs). The event payload is
+        // uint32 but MSFS interprets the high bit as sign: negative values
+        // (descents) are passed via unchecked two's-complement cast.
         var clamped = Environment.FlightEnvelope.ClampVerticalSpeedFpm(vsFpm, vsFpm > 0);
-        var raw = (int)Math.Round(clamped * 65536.0 / 1000.0);
+        var raw = (int)Math.Round(clamped);
         _sc.FireEvent("AP_VS_VAR_SET_ENGLISH", unchecked((uint)raw));
         _sc.FireEvent("AP_PANEL_VS_HOLD");
         Log($"AP_VS_VAR_SET_ENGLISH={raw} AP_PANEL_VS_HOLD (requested={vsFpm:F0}fpm)");
@@ -183,6 +201,25 @@ public sealed class HybridAutopilot
         _sc.FireEvent("PARKING_BRAKE_SET", set ? (uint)1 : (uint)0);
         Log($"PARKING_BRAKE_SET={(set ? 1u : 0u)}");
     }
+
+    // Last brake values sent — brake axes persist in the sim, so repeat
+    // identical commands are pure SimConnect spam (taxi calls these every
+    // tick). -1 sentinel guarantees the first command always goes out.
+    private double _lastBrakeLeft = -1, _lastBrakeRight = -1;
+
+    public void SetBrakes(double left, double right)
+    {
+        left = Math.Clamp(left, 0, 1);
+        right = Math.Clamp(right, 0, 1);
+        if (left == _lastBrakeLeft && right == _lastBrakeRight) return;
+        _lastBrakeLeft = left; _lastBrakeRight = right;
+        var l = (int)Math.Round(-16383 + left * 32766.0);
+        var r = (int)Math.Round(-16383 + right * 32766.0);
+        _sc.FireEvent("AXIS_LEFT_BRAKE_SET", unchecked((uint)l));
+        _sc.FireEvent("AXIS_RIGHT_BRAKE_SET", unchecked((uint)r));
+    }
+
+    public void ReleaseBrakes() => SetBrakes(0, 0);
 
     public void SetThrottleFraction(double fraction)
         => _sc.FireEvent("THROTTLE_SET", (uint)Math.Clamp(Math.Round(fraction * 16384), 0, 16383));
@@ -269,7 +306,7 @@ public sealed class HybridAutopilot
         if (t.TargetHeadingDeg is { } hdgT)
         {
             var hdgErr = Geo.GeoMath.AngleDelta(hdgT, s.TrueHeading);
-            var maxBank = Math.Min(t.MaxBankDeg, t.MaxBankDeg * t.ControlScale + 5);
+            var maxBank = Math.Min(t.MaxBankDeg, _profile.MaxBankDeg * t.ControlScale * _profile.ControlAuthority + 5);
             var desiredBank = Math.Clamp(hdgErr * 1.5, -maxBank, maxBank);
             bankCmd = _bank.Update(desiredBank - s.Bank, dt) * t.ControlScale;
             rudderCmd = -hdgErr / 45.0; // gentle coordination
@@ -340,6 +377,10 @@ public sealed class HybridAutopilot
     /// <summary>Returns all axes to neutral and releases the throttle to idle-ish.</summary>
     public void Neutralize()
     {
+        // Brake axes persist independently of the flight controls — release
+        // them even when the surfaces are already neutral (dedup makes this
+        // a no-op unless brakes are actually applied).
+        ReleaseBrakes();
         // Already-neutral surfaces need no events — callers such as the service
         // wait invoke this every tick and would otherwise spam 60 events/s.
         if (_axesNeutralised) return;
@@ -363,6 +404,9 @@ public sealed class HybridAutopilot
         _directMode = direct;
         ResetAll();
         _axesPrimed = false;
+        // Wheel brakes persist across phases — never carry them into a mode
+        // switch (e.g. taxi hold-short braking must not bleed into takeoff).
+        ReleaseBrakes();
         if (direct) { ApMaster(false); Log("Direct mode ON"); }
         else
         {
